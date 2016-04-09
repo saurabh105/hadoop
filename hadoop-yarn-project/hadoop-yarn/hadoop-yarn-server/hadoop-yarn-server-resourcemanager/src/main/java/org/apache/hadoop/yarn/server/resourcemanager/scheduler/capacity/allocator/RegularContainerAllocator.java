@@ -28,12 +28,12 @@ import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
-import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceLimits;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSAMContainerLaunchDiagnosticsConstants;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSAssignment;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.SchedulingMode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
@@ -41,6 +41,9 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaS
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Allocate normal (new) containers, considers locality/label, etc. Using
@@ -79,6 +82,8 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
       FiCaSchedulerNode node, SchedulingMode schedulingMode,
       ResourceLimits resourceLimits, Priority priority) {
     if (SchedulerAppUtils.isBlacklisted(application, node, LOG)) {
+      application.updateAppSkipNodeDiagnostics(
+          CSAMContainerLaunchDiagnosticsConstants.SKIP_AM_ALLOCATION_IN_BLACK_LISTED_NODE);
       return ContainerAllocation.APP_SKIPPED;
     }
 
@@ -99,16 +104,14 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
     // AM container allocation doesn't support non-exclusive allocation to
     // avoid painful of preempt an AM container
     if (schedulingMode == SchedulingMode.IGNORE_PARTITION_EXCLUSIVITY) {
-      RMAppAttempt rmAppAttempt =
-          rmContext.getRMApps().get(application.getApplicationId())
-              .getCurrentAppAttempt();
-      if (rmAppAttempt.getSubmissionContext().getUnmanagedAM() == false
-          && null == rmAppAttempt.getMasterContainer()) {
+      if (application.isWaitingForAMContainer()) {
         if (LOG.isDebugEnabled()) {
           LOG.debug("Skip allocating AM container to app_attempt="
               + application.getApplicationAttemptId()
               + ", don't allow to allocate AM container in non-exclusive mode");
         }
+        application.updateAppSkipNodeDiagnostics(
+            "Skipping assigning to Node in Ignore Exclusivity mode. ");
         return ContainerAllocation.APP_SKIPPED;
       }
     }
@@ -246,8 +249,11 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
       float localityWaitFactor =
           getLocalityWaitFactor(priority, rmContext.getScheduler()
               .getNumClusterNodes());
-
-      return ((requiredContainers * localityWaitFactor) < missedOpportunities);
+      // Cap the delay by the number of nodes in the cluster. Under most conditions
+      // this means we will consider each node in the cluster before
+      // accepting an off-switch assignment.
+      return (Math.min(rmContext.getScheduler().getNumClusterNodes(),
+          (requiredContainers * localityWaitFactor)) < missedOpportunities);
     }
 
     // Check if we need containers on this rack
@@ -315,6 +321,8 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
           schedulingMode, currentResoureLimits);
     }
 
+    application.updateAppSkipNodeDiagnostics(
+        CSAMContainerLaunchDiagnosticsConstants.SKIP_AM_ALLOCATION_DUE_TO_LOCALITY);
     return ContainerAllocation.APP_SKIPPED;
   }
 
@@ -418,7 +426,7 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
     }
 
     Resource capability = request.getCapability();
-    Resource available = node.getAvailableResource();
+    Resource available = node.getUnallocatedResource();
     Resource totalResource = node.getTotalResource();
 
     if (!Resources.lessThanOrEqual(rc, clusterResource,
@@ -429,9 +437,6 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
       // Skip this locality request
       return ContainerAllocation.LOCALITY_SKIPPED;
     }
-
-    assert Resources.greaterThan(
-        rc, clusterResource, available, Resources.none());
 
     boolean shouldAllocOrReserveNewContainer = shouldAllocOrReserveNewContainer(
         priority, capability);
@@ -454,6 +459,29 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
     RMContainer unreservedContainer = null;
     boolean reservationsContinueLooking =
         application.getCSLeafQueue().getReservationContinueLooking();
+
+    // Check if we need to kill some containers to allocate this one
+    List<RMContainer> toKillContainers = null;
+    if (availableContainers == 0 && currentResoureLimits.isAllowPreemption()) {
+      Resource availableAndKillable = Resources.clone(available);
+      for (RMContainer killableContainer : node
+          .getKillableContainers().values()) {
+        if (null == toKillContainers) {
+          toKillContainers = new ArrayList<>();
+        }
+        toKillContainers.add(killableContainer);
+        Resources.addTo(availableAndKillable,
+                        killableContainer.getAllocatedResource());
+        if (Resources.fitsIn(rc,
+                             clusterResource,
+                             capability,
+                             availableAndKillable)) {
+          // Stop if we find enough spaces
+          availableContainers = 1;
+          break;
+        }
+      }
+    }
 
     if (availableContainers > 0) {
       // Allocate...
@@ -494,12 +522,12 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
           new ContainerAllocation(unreservedContainer, request.getCapability(),
               AllocationState.ALLOCATED);
       result.containerNodeType = type;
+      result.setToKillContainers(toKillContainers);
       return result;
     } else {
       // if we are allowed to allocate but this node doesn't have space, reserve
       // it or if this was an already a reserved container, reserve it again
       if (shouldAllocOrReserveNewContainer || rmContainer != null) {
-
         if (reservationsContinueLooking && rmContainer == null) {
           // we could possibly ignoring queue capacity or user limits when
           // reservationsContinueLooking is set. Make sure we didn't need to
@@ -517,6 +545,7 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
             new ContainerAllocation(null, request.getCapability(),
                 AllocationState.RESERVED);
         result.containerNodeType = type;
+        result.setToKillContainers(null);
         return result;
       }
       // Skip the locality request
@@ -608,8 +637,7 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
   }
 
   ContainerAllocation doAllocation(ContainerAllocation allocationResult,
-      Resource clusterResource, FiCaSchedulerNode node,
-      SchedulingMode schedulingMode, Priority priority,
+      FiCaSchedulerNode node, Priority priority,
       RMContainer reservedContainer) {
     // Create the container if necessary
     Container container =
@@ -618,6 +646,8 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
 
     // something went wrong getting/creating the container
     if (container == null) {
+      application
+          .updateAppSkipNodeDiagnostics("Scheduling of container failed. ");
       LOG.warn("Couldn't get container for allocation!");
       return ContainerAllocation.APP_SKIPPED;
     }
@@ -643,9 +673,15 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
         if (LOG.isDebugEnabled()) {
           LOG.debug("Resetting scheduling opportunities");
         }
-        application.resetSchedulingOpportunities(priority);
+        // Only reset scheduling opportunities for RACK_LOCAL if configured
+        // to do so. Not resetting means we will continue to schedule
+        // RACK_LOCAL without delay.
+        if (allocationResult.containerNodeType == NodeType.NODE_LOCAL
+            || application.getCSLeafQueue().getRackLocalityFullReset()) {
+          application.resetSchedulingOpportunities(priority);
+        }
       }
-      
+
       // Non-exclusive scheduling opportunity is different: we need reset
       // it every time to make sure non-labeled resource request will be
       // most likely allocated on non-labeled nodes first.
@@ -665,9 +701,7 @@ public class RegularContainerAllocator extends AbstractContainerAllocator {
 
     if (AllocationState.ALLOCATED == result.state
         || AllocationState.RESERVED == result.state) {
-      result =
-          doAllocation(result, clusterResource, node, schedulingMode, priority,
-              reservedContainer);
+      result = doAllocation(result, node, priority, reservedContainer);
     }
 
     return result;

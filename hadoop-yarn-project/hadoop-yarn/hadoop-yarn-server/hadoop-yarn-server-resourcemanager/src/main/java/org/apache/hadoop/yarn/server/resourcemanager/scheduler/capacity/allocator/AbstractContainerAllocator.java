@@ -89,7 +89,7 @@ public abstract class AbstractContainerAllocator {
         LOG.info("assignedContainer" + " application attempt="
             + application.getApplicationAttemptId() + " container="
             + updatedContainer.getId() + " queue=" + this + " clusterResource="
-            + clusterResource);
+            + clusterResource + " type=" + assignment.getType());
 
         application
             .getCSLeafQueue()
@@ -108,6 +108,8 @@ public abstract class AbstractContainerAllocator {
           assignment.setFulfilledReservation(true);
         }
       }
+
+      assignment.setContainersToKill(result.getToKillContainers());
     }
     
     return assignment;

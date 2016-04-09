@@ -36,6 +36,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
+import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.security.AMRMTokenSecretManager;
@@ -90,7 +91,9 @@ public class TestZKRMStateStorePerf extends RMStateStoreTestBase
     if (appTokenMgr != null) {
       appTokenMgr.stop();
     }
-    curatorTestingServer.stop();
+    if (curatorTestingServer != null) {
+      curatorTestingServer.stop();
+    }
   }
 
   private void initStore(String hostPort) {
@@ -98,11 +101,13 @@ public class TestZKRMStateStorePerf extends RMStateStoreTestBase
     RMContext rmContext = mock(RMContext.class);
 
     conf = new YarnConfiguration();
-    conf.set(YarnConfiguration.RM_ZK_ADDRESS,
-        optHostPort.or(curatorTestingServer.getConnectString()));
+    conf.set(YarnConfiguration.RM_ZK_ADDRESS, optHostPort
+        .or((curatorTestingServer == null) ? "" : curatorTestingServer
+            .getConnectString()));
     conf.set(YarnConfiguration.ZK_RM_STATE_STORE_PARENT_PATH, workingZnode);
 
     store = new ZKRMStateStore();
+    store.setResourceManager(new ResourceManager());
     store.init(conf);
     store.start();
     when(rmContext.getStateStore()).thenReturn(store);

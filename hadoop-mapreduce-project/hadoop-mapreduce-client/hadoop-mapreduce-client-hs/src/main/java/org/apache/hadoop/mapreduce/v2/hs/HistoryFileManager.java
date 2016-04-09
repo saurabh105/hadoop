@@ -66,6 +66,7 @@ import org.apache.hadoop.mapreduce.v2.jobhistory.JobIndexInfo;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.util.ShutdownThreadsHelper;
+import org.apache.hadoop.util.concurrent.HadoopThreadPoolExecutor;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -219,13 +220,21 @@ public class HistoryFileManager extends AbstractService {
         // keeping the cache size exactly at the maximum.
         Iterator<JobId> keys = cache.navigableKeySet().iterator();
         long cutoff = System.currentTimeMillis() - maxAge;
+
+        // MAPREDUCE-6436: In order to reduce the number of logs written
+        // in case of a lot of move pending histories.
+        JobId firstInIntermediateKey = null;
+        int inIntermediateCount = 0;
+        JobId firstMoveFailedKey = null;
+        int moveFailedCount = 0;
+
         while(cache.size() > maxSize && keys.hasNext()) {
           JobId key = keys.next();
           HistoryFileInfo firstValue = cache.get(key);
           if(firstValue != null) {
             synchronized(firstValue) {
               if (firstValue.isMovePending()) {
-                if(firstValue.didMoveFail() && 
+                if(firstValue.didMoveFail() &&
                     firstValue.jobIndexInfo.getFinishTime() <= cutoff) {
                   cache.remove(key);
                   //Now lets try to delete it
@@ -236,14 +245,37 @@ public class HistoryFileManager extends AbstractService {
                     		" that could not be moved to done.", e);
                   }
                 } else {
-                  LOG.warn("Waiting to remove " + key
-                      + " from JobListCache because it is not in done yet.");
+                  if (firstValue.didMoveFail()) {
+                    if (moveFailedCount == 0) {
+                      firstMoveFailedKey = key;
+                    }
+                    moveFailedCount += 1;
+                  } else {
+                    if (inIntermediateCount == 0) {
+                      firstInIntermediateKey = key;
+                    }
+                    inIntermediateCount += 1;
+                  }
                 }
               } else {
                 cache.remove(key);
               }
             }
           }
+        }
+        // Log output only for first jobhisotry in pendings to restrict
+        // the total number of logs.
+        if (inIntermediateCount > 0) {
+          LOG.warn("Waiting to remove IN_INTERMEDIATE state histories " +
+                  "(e.g. " + firstInIntermediateKey + ") from JobListCache " +
+                  "because it is not in done yet. Total count is " +
+                  inIntermediateCount + ".");
+        }
+        if (moveFailedCount > 0) {
+          LOG.warn("Waiting to remove MOVE_FAILED state histories " +
+                  "(e.g. " + firstMoveFailedKey + ") from JobListCache " +
+                  "because it is not in done yet. Total count is " +
+                  moveFailedCount + ".");
         }
       }
       return old;
@@ -422,10 +454,10 @@ public class HistoryFileManager extends AbstractService {
     }
 
     /**
-     * Return the history file.  This should only be used for testing.
+     * Return the history file.
      * @return the history file.
      */
-    synchronized Path getHistoryFile() {
+    public synchronized Path getHistoryFile() {
       return historyFile;
     }
     
@@ -505,7 +537,7 @@ public class HistoryFileManager extends AbstractService {
     long maxFSWaitTime = conf.getLong(
         JHAdminConfig.MR_HISTORY_MAX_START_WAIT_TIME,
         JHAdminConfig.DEFAULT_MR_HISTORY_MAX_START_WAIT_TIME);
-    createHistoryDirs(new SystemClock(), 10 * 1000, maxFSWaitTime);
+    createHistoryDirs(SystemClock.getInstance(), 10 * 1000, maxFSWaitTime);
 
     this.aclsMgr = new JobACLsManager(conf);
 
@@ -523,8 +555,9 @@ public class HistoryFileManager extends AbstractService {
         JHAdminConfig.DEFAULT_MR_HISTORY_MOVE_THREAD_COUNT);
     ThreadFactory tf = new ThreadFactoryBuilder().setNameFormat(
         "MoveIntermediateToDone Thread #%d").build();
-    moveToDoneExecutor = new ThreadPoolExecutor(numMoveThreads, numMoveThreads,
-        1, TimeUnit.HOURS, new LinkedBlockingQueue<Runnable>(), tf);
+    moveToDoneExecutor = new HadoopThreadPoolExecutor(numMoveThreads,
+        numMoveThreads, 1, TimeUnit.HOURS,
+        new LinkedBlockingQueue<Runnable>(), tf);
 
     super.serviceInit(conf);
   }

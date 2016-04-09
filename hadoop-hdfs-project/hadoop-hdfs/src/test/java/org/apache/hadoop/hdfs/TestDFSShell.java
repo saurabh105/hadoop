@@ -559,6 +559,37 @@ public class TestDFSShell {
     }
   }
 
+  @Test
+  public void testMoveWithTargetPortEmpty() throws Exception {
+    Configuration conf = new HdfsConfiguration();
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf)
+          .format(true)
+          .numDataNodes(2)
+          .nameNodePort(8020)
+          .waitSafeMode(true)
+          .build();
+      FileSystem srcFs = cluster.getFileSystem();
+      FsShell shell = new FsShell();
+      shell.setConf(conf);
+      String[] argv = new String[2];
+      argv[0] = "-mkdir";
+      argv[1] = "/testfile";
+      ToolRunner.run(shell, argv);
+      argv = new String[3];
+      argv[0] = "-mv";
+      argv[1] = srcFs.getUri() + "/testfile";
+      argv[2] = "hdfs://localhost/testfile2";
+      int ret = ToolRunner.run(shell, argv);
+      assertEquals("mv should have succeeded", 0, ret);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
   @Test (timeout = 30000)
   public void testURIPaths() throws Exception {
     Configuration srcConf = new HdfsConfiguration();
@@ -955,9 +986,9 @@ public class TestDFSShell {
       assertEquals(dirs, in.nextLong());
       assertEquals(files, in.nextLong());
     } finally {
+      System.setOut(oldOut);
       if (in!=null) in.close();
       IOUtils.closeStream(out);
-      System.setOut(oldOut);
       System.out.println("results:\n" + results);
     }
   }
@@ -1720,9 +1751,9 @@ public class TestDFSShell {
       assertEquals(returnvalue, shell.run(new String[]{"-lsr", root}));
       results = bytes.toString();
     } finally {
-      IOUtils.closeStream(out);
       System.setOut(oldOut);
       System.setErr(oldErr);
+      IOUtils.closeStream(out);
     }
     System.out.println("results:\n" + results);
     return results;
@@ -3179,15 +3210,16 @@ public class TestDFSShell {
     final ByteArrayOutputStream baos = new ByteArrayOutputStream();
     PrintStream ps = new PrintStream(baos);
     System.setErr(ps);
+    try {
+      runCmd(shell, "-ls", "/.reserved");
+      assertEquals(0, baos.toString().length());
 
-    runCmd(shell, "-ls", "/.reserved");
-    assertEquals(0, baos.toString().length());
-
-    runCmd(shell, "-ls", "/.reserved/raw/.reserved");
-    assertTrue(baos.toString().contains("No such file or directory"));
-
-    System.setErr(syserr);
-    cluster.shutdown();
+      runCmd(shell, "-ls", "/.reserved/raw/.reserved");
+      assertTrue(baos.toString().contains("No such file or directory"));
+    } finally {
+      System.setErr(syserr);
+      cluster.shutdown();
+    }
   }
 
   @Test (timeout = 30000)
@@ -3253,13 +3285,15 @@ public class TestDFSShell {
     final ByteArrayOutputStream baos = new ByteArrayOutputStream();
     PrintStream ps = new PrintStream(baos);
     System.setErr(ps);
-
-    FsShell shell = new FsShell();
-    shell.setConf(conf);
-    runCmd(shell, "-cp", src.toString(), "/.reserved");
-    assertTrue(baos.toString().contains("Invalid path name /.reserved"));
-    System.setErr(syserr);
-    cluster.shutdown();
+    try {
+      FsShell shell = new FsShell();
+      shell.setConf(conf);
+      runCmd(shell, "-cp", src.toString(), "/.reserved");
+      assertTrue(baos.toString().contains("Invalid path name /.reserved"));
+    } finally {
+      System.setErr(syserr);
+      cluster.shutdown();
+    }
   }
 
   @Test (timeout = 30000)
@@ -3274,13 +3308,15 @@ public class TestDFSShell {
     final ByteArrayOutputStream baos = new ByteArrayOutputStream();
     PrintStream ps = new PrintStream(baos);
     System.setErr(ps);
-
-    FsShell shell = new FsShell();
-    shell.setConf(conf);
-    runCmd(shell, "-chmod", "777", "/.reserved");
-    assertTrue(baos.toString().contains("Invalid path name /.reserved"));
-    System.setErr(syserr);
-    cluster.shutdown();
+    try {
+      FsShell shell = new FsShell();
+      shell.setConf(conf);
+      runCmd(shell, "-chmod", "777", "/.reserved");
+      assertTrue(baos.toString().contains("Invalid path name /.reserved"));
+    } finally {
+      System.setErr(syserr);
+      cluster.shutdown();
+    }
   }
 
   @Test (timeout = 30000)
@@ -3295,13 +3331,15 @@ public class TestDFSShell {
     final ByteArrayOutputStream baos = new ByteArrayOutputStream();
     PrintStream ps = new PrintStream(baos);
     System.setErr(ps);
-
-    FsShell shell = new FsShell();
-    shell.setConf(conf);
-    runCmd(shell, "-chown", "user1", "/.reserved");
-    assertTrue(baos.toString().contains("Invalid path name /.reserved"));
-    System.setErr(syserr);
-    cluster.shutdown();
+    try {
+      FsShell shell = new FsShell();
+      shell.setConf(conf);
+      runCmd(shell, "-chown", "user1", "/.reserved");
+      assertTrue(baos.toString().contains("Invalid path name /.reserved"));
+    } finally {
+      System.setErr(syserr);
+      cluster.shutdown();
+    }
   }
 
   @Test (timeout = 30000)
@@ -3337,7 +3375,7 @@ public class TestDFSShell {
       fs.createSnapshot(reserved, "snap");
       fail("Can't create snapshot on /.reserved");
     } catch (FileNotFoundException e) {
-      assertTrue(e.getMessage().contains("Directory does not exist"));
+      assertTrue(e.getMessage().contains("Directory/File does not exist"));
     }
     cluster.shutdown();
   }

@@ -33,6 +33,12 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
+import org.apache.hadoop.mapreduce.jobhistory.NormalizedResourceEvent;
+import org.apache.hadoop.mapreduce.v2.app.client.ClientService;
+import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocator;
+import org.apache.hadoop.mapreduce.v2.app.rm.ContainerAllocatorEvent;
+import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
+import org.apache.hadoop.yarn.util.resource.Resources;
 import org.junit.Assert;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
@@ -41,9 +47,11 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RawLocalFileSystem;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.MapTaskAttemptImpl;
+import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.JobCounter;
 import org.apache.hadoop.mapreduce.MRJobConfig;
+import org.apache.hadoop.mapreduce.TypeConverter;
 import org.apache.hadoop.mapreduce.jobhistory.JobHistoryEvent;
 import org.apache.hadoop.mapreduce.jobhistory.TaskAttemptUnsuccessfulCompletion;
 import org.apache.hadoop.mapreduce.split.JobSplit.TaskSplitMetaInfo;
@@ -82,6 +90,7 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Event;
@@ -250,22 +259,21 @@ public class TestTaskAttempt{
 
   @Test
   public void testMillisCountersUpdate() throws Exception {
-    verifyMillisCounters(2048, 2048, 1024);
-    verifyMillisCounters(2048, 1024, 1024);
-    verifyMillisCounters(10240, 1024, 2048);
+    verifyMillisCounters(Resource.newInstance(1024, 1), 512);
+    verifyMillisCounters(Resource.newInstance(2048, 4), 1024);
+    verifyMillisCounters(Resource.newInstance(10240, 8), 2048);
   }
 
-  public void verifyMillisCounters(int mapMemMb, int reduceMemMb,
+  public void verifyMillisCounters(Resource containerResource,
       int minContainerSize) throws Exception {
-    Clock actualClock = new SystemClock();
+    Clock actualClock = SystemClock.getInstance();
     ControlledClock clock = new ControlledClock(actualClock);
     clock.setTime(10);
     MRApp app =
         new MRApp(1, 1, false, "testSlotMillisCounterUpdate", true, clock);
+    app.setAllocatedContainerResource(containerResource);
     Configuration conf = new Configuration();
-    conf.setInt(MRJobConfig.MAP_MEMORY_MB, mapMemMb);
-    conf.setInt(MRJobConfig.REDUCE_MEMORY_MB, reduceMemMb);
-    conf.setInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB, 
+    conf.setInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB,
       minContainerSize);
     app.setClusterInfo(new ClusterInfo(Resource.newInstance(10240, 1)));
 
@@ -300,27 +308,30 @@ public class TestTaskAttempt{
     Assert.assertEquals(rta.getFinishTime(), 11);
     Assert.assertEquals(rta.getLaunchTime(), 10);
     Counters counters = job.getAllCounters();
-    Assert.assertEquals((int) Math.ceil((float) mapMemMb / minContainerSize),
+
+    int memoryMb = containerResource.getMemory();
+    int vcores = containerResource.getVirtualCores();
+    Assert.assertEquals((int) Math.ceil((float) memoryMb / minContainerSize),
         counters.findCounter(JobCounter.SLOTS_MILLIS_MAPS).getValue());
-    Assert.assertEquals((int) Math.ceil((float) reduceMemMb / minContainerSize),
+    Assert.assertEquals((int) Math.ceil((float) memoryMb / minContainerSize),
         counters.findCounter(JobCounter.SLOTS_MILLIS_REDUCES).getValue());
     Assert.assertEquals(1,
         counters.findCounter(JobCounter.MILLIS_MAPS).getValue());
     Assert.assertEquals(1,
         counters.findCounter(JobCounter.MILLIS_REDUCES).getValue());
-    Assert.assertEquals(mapMemMb,
+    Assert.assertEquals(memoryMb,
         counters.findCounter(JobCounter.MB_MILLIS_MAPS).getValue());
-    Assert.assertEquals(reduceMemMb,
+    Assert.assertEquals(memoryMb,
         counters.findCounter(JobCounter.MB_MILLIS_REDUCES).getValue());
-    Assert.assertEquals(1,
+    Assert.assertEquals(vcores,
         counters.findCounter(JobCounter.VCORES_MILLIS_MAPS).getValue());
-    Assert.assertEquals(1,
+    Assert.assertEquals(vcores,
         counters.findCounter(JobCounter.VCORES_MILLIS_REDUCES).getValue());
   }
 
   private TaskAttemptImpl createMapTaskAttemptImplForTest(
       EventHandler eventHandler, TaskSplitMetaInfo taskSplitMetaInfo) {
-    Clock clock = new SystemClock();
+    Clock clock = SystemClock.getInstance();
     return createMapTaskAttemptImplForTest(eventHandler, taskSplitMetaInfo, clock);
   }
 
@@ -512,7 +523,7 @@ public class TestTaskAttempt{
       new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
           splits, jobConf, taListener,
           new Token(), new Credentials(),
-          new SystemClock(), null);
+          SystemClock.getInstance(), null);
 
     NodeId nid = NodeId.newInstance("127.0.0.1", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -569,7 +580,7 @@ public class TestTaskAttempt{
       new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
           splits, jobConf, taListener,
           new Token(), new Credentials(),
-          new SystemClock(), appCtx);
+          SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.2", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -627,7 +638,7 @@ public class TestTaskAttempt{
       new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
           splits, jobConf, taListener,
           new Token(), new Credentials(),
-          new SystemClock(), appCtx);
+          SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.1", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -691,7 +702,7 @@ public class TestTaskAttempt{
       new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
           splits, jobConf, taListener,
           new Token(), new Credentials(),
-          new SystemClock(), appCtx);
+          SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.1", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -759,7 +770,7 @@ public class TestTaskAttempt{
 
     TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
         jobFile, 1, splits, jobConf, taListener,
-        new Token(), new Credentials(), new SystemClock(), appCtx);
+        new Token(), new Credentials(), SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.1", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -818,7 +829,7 @@ public class TestTaskAttempt{
       new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
         splits, jobConf, taListener,
         mock(Token.class), new Credentials(),
-        new SystemClock(), appCtx);
+        SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.1", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -884,7 +895,7 @@ public class TestTaskAttempt{
 
     TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
         jobFile, 1, splits, jobConf, taListener,
-        new Token(), new Credentials(), new SystemClock(), appCtx);
+        new Token(), new Credentials(), SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.1", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -934,7 +945,7 @@ public class TestTaskAttempt{
     TaskAttemptImpl taImpl =
       new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
       splits, jobConf, taListener,mock(Token.class), new Credentials(),
-      new SystemClock(), appCtx);
+      SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.1", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -1004,7 +1015,7 @@ public class TestTaskAttempt{
 
     TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
         jobFile, 1, splits, jobConf, taListener, new Token(),
-        new Credentials(), new SystemClock(), appCtx);
+        new Credentials(), SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.2", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -1058,7 +1069,7 @@ public class TestTaskAttempt{
 
     TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
         jobFile, 1, splits, jobConf, taListener, new Token(),
-        new Credentials(), new SystemClock(), appCtx);
+        new Credentials(), SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.2", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -1115,7 +1126,7 @@ public class TestTaskAttempt{
 
     TaskAttemptImpl taImpl = new MapTaskAttemptImpl(taskId, 1, eventHandler,
         jobFile, 1, splits, jobConf, taListener, new Token(),
-        new Credentials(), new SystemClock(), appCtx);
+        new Credentials(), SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.2", 0);
     ContainerId contId = ContainerId.newContainerId(appAttemptId, 3);
@@ -1376,7 +1387,7 @@ public class TestTaskAttempt{
         new MapTaskAttemptImpl(taskId, 1, eventHandler, jobFile, 1,
             splits, jobConf, taListener,
             mock(Token.class), new Credentials(),
-            new SystemClock(), appCtx);
+            SystemClock.getInstance(), appCtx);
 
     NodeId nid = NodeId.newInstance("127.0.0.1", 0);
     ContainerId contId = ContainerId.newInstance(appAttemptId, 3);

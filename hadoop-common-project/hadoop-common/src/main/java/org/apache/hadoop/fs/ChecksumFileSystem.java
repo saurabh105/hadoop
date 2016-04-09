@@ -25,6 +25,7 @@ import java.io.InputStream;
 import java.nio.channels.ClosedChannelException;
 import java.util.Arrays;
 
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -61,6 +62,9 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
     if (conf != null) {
       bytesPerChecksum = conf.getInt(LocalFileSystemConfigKeys.LOCAL_FS_BYTES_PER_CHECKSUM_KEY,
 		                     LocalFileSystemConfigKeys.LOCAL_FS_BYTES_PER_CHECKSUM_DEFAULT);
+      Preconditions.checkState(bytesPerChecksum > 0,
+          "bytes per checksum should be positive but was %s",
+          bytesPerChecksum);
     }
   }
   
@@ -178,20 +182,18 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
     public int read(long position, byte[] b, int off, int len)
       throws IOException {
       // parameter check
-      if ((off | len | (off + len) | (b.length - (off + len))) < 0) {
-        throw new IndexOutOfBoundsException();
-      } else if (len == 0) {
+      validatePositionedReadArgs(position, b, off, len);
+      if (len == 0) {
         return 0;
       }
-      if( position<0 ) {
-        throw new IllegalArgumentException(
-            "Parameter position can not to be negative");
-      }
 
-      ChecksumFSInputChecker checker = new ChecksumFSInputChecker(fs, file);
-      checker.seek(position);
-      int nread = checker.read(b, off, len);
-      checker.close();
+      int nread;
+      try (ChecksumFSInputChecker checker =
+               new ChecksumFSInputChecker(fs, file)) {
+        checker.seek(position);
+        nread = checker.read(b, off, len);
+        checker.close();
+      }
       return nread;
     }
     

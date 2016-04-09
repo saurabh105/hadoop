@@ -17,6 +17,9 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.hadoop.util.Time.monotonicNow;
+
 import java.util.AbstractList;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -26,26 +29,24 @@ import java.util.Queue;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.server.namenode.INodeId;
+import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.Namesystem;
 import org.apache.hadoop.hdfs.util.CyclicIteration;
 import org.apache.hadoop.util.ChunkedArrayList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static org.apache.hadoop.util.Time.monotonicNow;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * Manages datanode decommissioning. A background monitor thread 
@@ -214,10 +215,10 @@ public class DecommissionManager {
     if (node.isDecommissionInProgress() || node.isDecommissioned()) {
       // Update DN stats maintained by HeartbeatManager
       hbManager.stopDecommission(node);
-      // Over-replicated blocks will be detected and processed when
+      // extra redundancy blocks will be detected and processed when
       // the dead node comes back and send in its full block report.
       if (node.isAlive()) {
-        blockManager.processOverReplicatedBlocksOnReCommission(node);
+        blockManager.processExtraRedundancyBlocksOnReCommission(node);
       }
       // Remove from tracking in DecommissionManager
       pendingNodes.remove(node);
@@ -243,8 +244,9 @@ public class DecommissionManager {
       NumberReplicas numberReplicas) {
     final int numExpected = blockManager.getExpectedReplicaNum(block);
     final int numLive = numberReplicas.liveReplicas();
-    if (!blockManager.isNeededReplication(block, numLive)) {
-      // Block doesn't need replication. Skip.
+    if (numLive >= numExpected
+        && blockManager.isPlacementPolicySatisfied(block)) {
+      // Block has enough replica, skip
       LOG.trace("Block {} does not need replication.", block);
       return true;
     }
@@ -279,6 +281,10 @@ public class DecommissionManager {
       BlockCollection bc,
       DatanodeDescriptor srcNode, NumberReplicas num,
       Iterable<DatanodeStorageInfo> storages) {
+    if (!NameNode.blockStateChangeLog.isInfoEnabled()) {
+      return;
+    }
+
     int curReplicas = num.liveReplicas();
     int curExpectedReplicas = blockManager.getExpectedReplicaNum(block);
     StringBuilder nodeList = new StringBuilder();
@@ -287,7 +293,8 @@ public class DecommissionManager {
       nodeList.append(node);
       nodeList.append(" ");
     }
-    LOG.info("Block: " + block + ", Expected Replicas: "
+    NameNode.blockStateChangeLog.info(
+        "Block: " + block + ", Expected Replicas: "
         + curExpectedReplicas + ", live replicas: " + curReplicas
         + ", corrupt replicas: " + num.corruptReplicas()
         + ", decommissioned replicas: " + num.decommissioned()
@@ -441,17 +448,10 @@ public class DecommissionManager {
             LOG.debug("Node {} is sufficiently replicated and healthy, "
                 + "marked as decommissioned.", dn);
           } else {
-            if (LOG.isDebugEnabled()) {
-              StringBuilder b = new StringBuilder("Node {} ");
-              if (isHealthy) {
-                b.append("is ");
-              } else {
-                b.append("isn't ");
-              }
-              b.append("healthy and still needs to replicate {} more blocks," +
-                  " decommissioning is still in progress.");
-              LOG.debug(b.toString(), dn, blocks.size());
-            }
+            LOG.debug("Node {} {} healthy."
+                + " It needs to replicate {} more blocks."
+                + " Decommissioning is still in progress.",
+                dn, isHealthy? "is": "isn't", blocks.size());
           }
         } else {
           LOG.debug("Node {} still has {} blocks to replicate "
@@ -513,9 +513,9 @@ public class DecommissionManager {
         final List<BlockInfo> insufficientList,
         boolean pruneReliableBlocks) {
       boolean firstReplicationLog = true;
-      int underReplicatedBlocks = 0;
+      int lowRedundancyBlocks = 0;
       int decommissionOnlyReplicas = 0;
-      int underReplicatedInOpenFiles = 0;
+      int lowRedundancyInOpenFiles = 0;
       while (it.hasNext()) {
         numBlocksChecked++;
         final BlockInfo block = it.next();
@@ -533,26 +533,26 @@ public class DecommissionManager {
           continue;
         }
 
-        BlockCollection bc = namesystem.getBlockCollection(bcId);
+        final BlockCollection bc = blockManager.getBlockCollection(block);
         final NumberReplicas num = blockManager.countNodes(block);
         final int liveReplicas = num.liveReplicas();
 
-        // Schedule under-replicated blocks for replication if not already
+        // Schedule low redundancy blocks for reconstruction if not already
         // pending
-        if (blockManager.isNeededReplication(block, liveReplicas)) {
-          if (!blockManager.neededReplications.contains(block) &&
+        if (blockManager.isNeededReconstruction(block, liveReplicas)) {
+          if (!blockManager.neededReconstruction.contains(block) &&
               blockManager.pendingReplications.getNumReplicas(block) == 0 &&
               blockManager.isPopulatingReplQueues()) {
             // Process these blocks only when active NN is out of safe mode.
-            blockManager.neededReplications.add(block,
+            blockManager.neededReconstruction.add(block,
                 liveReplicas, num.readOnlyReplicas(),
                 num.decommissionedAndDecommissioning(),
                 blockManager.getExpectedReplicaNum(block));
           }
         }
 
-        // Even if the block is under-replicated, 
-        // it doesn't block decommission if it's sufficiently replicated
+        // Even if the block is without sufficient redundancy,
+        // it doesn't block decommission if has sufficient redundancy
         if (isSufficient(block, bc, num)) {
           if (pruneReliableBlocks) {
             it.remove();
@@ -560,7 +560,7 @@ public class DecommissionManager {
           continue;
         }
 
-        // We've found an insufficiently replicated block.
+        // We've found a block without sufficient redundancy.
         if (insufficientList != null) {
           insufficientList.add(block);
         }
@@ -571,24 +571,23 @@ public class DecommissionManager {
           firstReplicationLog = false;
         }
         // Update various counts
-        underReplicatedBlocks++;
+        lowRedundancyBlocks++;
         if (bc.isUnderConstruction()) {
-          underReplicatedInOpenFiles++;
+          lowRedundancyInOpenFiles++;
         }
         if ((liveReplicas == 0) && (num.decommissionedAndDecommissioning() > 0)) {
           decommissionOnlyReplicas++;
         }
       }
 
-      datanode.decommissioningStatus.set(underReplicatedBlocks,
+      datanode.decommissioningStatus.set(lowRedundancyBlocks,
           decommissionOnlyReplicas,
-          underReplicatedInOpenFiles);
+          lowRedundancyInOpenFiles);
     }
   }
 
   @VisibleForTesting
-  void runMonitor() throws ExecutionException, InterruptedException {
-    Future f = executor.submit(monitor);
-    f.get();
+  void runMonitorForTest() throws ExecutionException, InterruptedException {
+    executor.submit(monitor).get();
   }
 }

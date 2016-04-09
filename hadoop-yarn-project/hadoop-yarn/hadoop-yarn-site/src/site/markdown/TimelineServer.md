@@ -26,6 +26,10 @@ The YARN Timeline Server
 * [Publishing of application specific data](#Publishing_of_application_specific_data)
 * [Timeline Server REST API](#Timeline_Server_REST_API_v1)
 * [Generic Data REST APIs](#GENERIC_DATA_REST_APIS)
+* [Timelnine Server Performance Test Tool](#TIMELINE_SERVER_PERFORMANCE_TEST_TOOL)
+    * [Highlights](#HIGHLIGHTS)
+    * [Usage](#USAGE)
+    * [Sample Runs](#SAMPLE_RUNS)
 
 <a name="Overview"></a>Overview
 ---------
@@ -52,6 +56,7 @@ With the introduction of the timeline server, the Application History Server bec
 the Timeline Server.
 
 Generic information includes application level data such as 
+
 * queue-name, 
 * user information and the like set in the `ApplicationSubmissionContext`,
 * a list of application-attempts that ran for an application
@@ -137,7 +142,7 @@ and cluster operators.
 
 | Configuration Property | Description |
 |:---- |:---- |
-| `yarn.timeline-service.enabled` | Indicate to clients whether Timeline service is enabled or not. If enabled, the `TimelineClient` library used by applications will post entities and events to the Timeline server. Defaults to `false`. |
+| `yarn.timeline-service.enabled` | In the server side it indicates whether timeline service is enabled or not. And in the client side, users can enable it to indicate whether client wants to use timeline service. If it's enabled in the client side along with security, then yarn client tries to fetch the delegation tokens for the timeline server. Defaults to `false`. |
 | `yarn.resourcemanager.system-metrics-publisher.enabled` | The setting that controls whether or not YARN system metrics are published on the timeline server by RM. Defaults to `false`. |
 | `yarn.timeline-service.generic-application-history.enabled` | Indicate to clients whether to query generic application data from timeline history-service or not. If not enabled then application data is queried only from Resource Manager. Defaults to `false`. |
 
@@ -146,7 +151,7 @@ and cluster operators.
 | Configuration Property | Description |
 |:---- |:---- |
 | `yarn.timeline-service.store-class` | Store class name for timeline store. Defaults to `org.apache.hadoop.yarn.server.timeline.LeveldbTimelineStore`. |
-| `yarn.timeline-service.leveldb-timeline-store.path` | Store file name for leveldb timeline store. Defaults to `${hadoop.tmp.dir}/yarn/timelin`e. |
+| `yarn.timeline-service.leveldb-timeline-store.path` | Store file name for leveldb timeline store. Defaults to `${hadoop.tmp.dir}/yarn/timeline`. |
 | `yarn.timeline-service.leveldb-timeline-store.ttl-interval-ms` | Length of time to wait between deletion cycles of leveldb timeline store in milliseconds. Defaults to `300000`. |
 | `yarn.timeline-service.leveldb-timeline-store.read-cache-size` | Size of read cache for uncompressed blocks for leveldb timeline store in bytes. Defaults to `104857600`. |
 | `yarn.timeline-service.leveldb-timeline-store.start-time-read-cache-size` | Size of cache for recently read entity start times for leveldb timeline store in number of entities. Defaults to `10000`. |
@@ -172,7 +177,7 @@ and cluster operators.
 
 Note that the selection between the HTTP and HTTPS binding is made in the `TimelineClient` based
 upon the value of the YARN-wide configuration option `yarn.http.policy`; the HTTPS endpoint will be
-selected if this policy is either of `HTTPS_ONLY` or `HTTP_AND_HTTPS`.
+selected if this policy is `HTTPS_ONLY`.
 
 #### Advanced Server-side configuration
 
@@ -188,6 +193,7 @@ selected if this policy is either of `HTTPS_ONLY` or `HTTP_AND_HTTPS`.
 #### UI Hosting Configuration
 
 The timeline service can host multiple UIs if enabled. The service can support both static web sites hosted in a directory or war files bundled. The web UI is then hosted on the timeline service HTTP port under the path configured.
+
 | Configuration Property | Description |
 |:---- |:---- |
 | `yarn.timeline-service.ui-names` | Comma separated list of UIs that will be hosted. Defaults to `none`. |
@@ -211,7 +217,7 @@ to `kerberos`, after which the following configuration options are available:
 | `yarn.timeline-service.delegation.key.update-interval` | Defaults to `86400000` (1 day). |
 | `yarn.timeline-service.delegation.token.renew-interval` | Defaults to `86400000` (1 day). |
 | `yarn.timeline-service.delegation.token.max-lifetime` | Defaults to `604800000` (7 days). |
-| `yarn.timeline-service.best-effort` | Should the failure to obtain a delegation token be considered an application failure (option = false),  or should the client attempt to continue to publish information without it (option=true). Default: `false` |
+| `yarn.timeline-service.client.best-effort` | Should the failure to obtain a delegation token be considered an application failure (option = false),  or should the client attempt to continue to publish information without it (option=true). Default: `false` |
 
 #### Enabling the timeline service and the generic history service
 
@@ -779,8 +785,8 @@ String.
 | `entitytype` | string | The entity type |
 | `relatedentities` | map | The related entities' identifiers, which are organized in a map of entityType : [entity1, entity2, ...] |
 | `events` | list | The events of the entity |
-| `primaryfilters` | map | The primary filters of the entity, which are orgainzied in a map of key : [value1, value2, ...] |
-| `otherinfo` | map | The other information of the entity, which is orgainzied in a map of key : value |
+| `primaryfilters` | map | The primary filters of the entity, which are organized in a map of key : [value1, value2, ...] |
+| `otherinfo` | map | The other information of the entity, which is organized in a map of key : value |
 | `starttime` | long | The start time of the entity |
 
 ### Response Examples:
@@ -2033,3 +2039,78 @@ This hides details of other domains from an unauthorized caller.
 this failure *will not* result in an HTTP error code being retured.
 A status code of 200 will be returned —however, there will be an error code
 in the list of failed entities for each entity which could not be added.
+
+<a name="TIMELINE_SERVER_PERFORMANCE_TEST_TOOL"></a> Timeline Server Performance Test Tool
+----------
+###<a name="HIGHLIGHTS"></a>Highlights
+
+The timeline server performance test tool helps measure timeline server's write performance. The test
+launches SimpleEntityWriter mappers or JobHistoryFileReplay mappers to write timeline
+entities to the timeline server. At the end, the transaction rate(ops/s) per mapper and the total transaction rate
+will be measured and printed out. Running the test with SimpleEntityWriter mappers
+will also measure and show the IO rate(KB/s) per mapper and the total IO rate.
+
+###<a name="USAGE"></a>Usage
+
+Mapper Types Description:
+
+     1. SimpleEntityWriter mapper
+        Each mapper writes a user-specified number of timeline entities
+        with a user-specified size to the timeline server. SimpleEntityWrite
+        is a default mapper of the performance test tool.
+
+     2. JobHistoryFileReplay mapper
+        Each mapper replays jobhistory files under a specified directory
+        (both the jhist file and its corresponding conf.xml are required to
+         be present in order to be replayed. The number of mappers should be no more
+         than the number of jobhistory files).
+        Each mapper will get assigned some jobhistory files to replay. For each
+        job history file, a mapper will parse it to get jobinfo and then create
+        timeline entities. Each mapper also has the choice to write all the
+        timeline entities created at once or one at a time.
+
+Options:
+
+    [-m <maps>] number of mappers (default: 1)
+    [-v] timeline service version
+    [-mtype <mapper type in integer>]
+          1. simple entity write mapper (default)
+          2. jobhistory files replay mapper
+    [-s <(KBs)test>] number of KB per put (mtype=1, default: 1 KB)
+    [-t] package sending iterations per mapper (mtype=1, default: 100)
+    [-d <path>] root path of job history files (mtype=2)
+    [-r <replay mode>] (mtype=2)
+          1. write all entities for a job in one put (default)
+          2. write one entity at a time
+
+###<a name="SAMPLE_RUNS"></a>Sample Runs
+
+Run SimpleEntityWriter test:
+
+    bin/hadoop jar performanceTest.jar timelineperformance -m 4 -mtype 1 -s 3 -t 200
+
+Example output of SimpleEntityWriter test :
+
+    TRANSACTION RATE (per mapper): 20000.0 ops/s
+    IO RATE (per mapper): 60000.0 KB/s
+    TRANSACTION RATE (total): 80000.0 ops/s
+    IO RATE (total): 240000.0 KB/s
+
+Run JobHistoryFileReplay mapper test
+
+    $ bin/hadoop jar performanceTest.jar timelineperformance -m 2 -mtype 2 -d /testInput -r 2
+
+Example input of JobHistoryFileReplay mapper test:
+
+    $ bin/hadoop fs -ls /testInput
+    /testInput/job_1.jhist
+    /testInput/job_1_conf.xml
+    /testInput/job_2.jhist
+    /testInput/job_2_conf.xml
+
+Example output of JobHistoryFileReplay test:
+
+    TRANSACTION RATE (per mapper): 4000.0 ops/s
+    IO RATE (per mapper): 0.0 KB/s
+    TRANSACTION RATE (total): 8000.0 ops/s
+    IO RATE (total): 0.0 KB/s

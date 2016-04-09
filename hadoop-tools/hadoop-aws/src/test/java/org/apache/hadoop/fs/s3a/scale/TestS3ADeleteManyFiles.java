@@ -44,6 +44,15 @@ public class TestS3ADeleteManyFiles extends S3AScaleTestBase {
   @Rule
   public Timeout testTimeout = new Timeout(30 * 60 * 1000);
 
+  /**
+   * CAUTION: If this test starts failing, please make sure that the
+   * {@link org.apache.hadoop.fs.s3a.Constants#MAX_THREADS} configuration is not
+   * set too low. Alternatively, consider reducing the
+   * <code>scale.test.operation.count</code> parameter in
+   * <code>getOperationCount()</code>.
+   *
+   * @see #getOperationCount()
+   */
   @Test
   public void testBulkRenameAndDelete() throws Throwable {
     final Path scaleTestDir = getTestPath();
@@ -61,7 +70,7 @@ public class TestS3ADeleteManyFiles extends S3AScaleTestBase {
     // use Executor to speed up file creation
     ExecutorService exec = Executors.newFixedThreadPool(16);
     final ExecutorCompletionService<Boolean> completionService =
-        new ExecutorCompletionService<Boolean>(exec);
+        new ExecutorCompletionService<>(exec);
     try {
       final byte[] data = ContractTestUtils.dataset(testBufferSize, 'a', 'z');
 

@@ -124,8 +124,11 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
   private final long rollingMonitorInterval;
   private final boolean logAggregationInRolling;
   private final NodeId nodeId;
-  // This variable is only for testing
+
+  // These variables are only for testing
   private final AtomicBoolean waiting = new AtomicBoolean(false);
+  private int logAggregationTimes = 0;
+  private int cleanupOldLogTimes = 0;
 
   private boolean renameTemporaryLogFileFailed = false;
 
@@ -189,12 +192,12 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
       }
     } else {
       if (configuredRollingMonitorInterval <= 0) {
-        LOG.warn("rollingMonitorInterval is set as "
+        LOG.info("rollingMonitorInterval is set as "
             + configuredRollingMonitorInterval + ". "
-            + "The log rolling mornitoring interval is disabled. "
+            + "The log rolling monitoring interval is disabled. "
             + "The logs will be aggregated after this application is finished.");
       } else {
-        LOG.warn("rollingMonitorInterval is set as "
+        LOG.info("rollingMonitorInterval is set as "
             + configuredRollingMonitorInterval + ". "
             + "The logs will be aggregated every "
             + configuredRollingMonitorInterval + " seconds");
@@ -311,7 +314,15 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
     }
 
     LogWriter writer = null;
+    String diagnosticMessage = "";
+    boolean logAggregationSucceedInThisCycle = true;
     try {
+      if (pendingContainerInThisCycle.isEmpty()) {
+        return;
+      }
+
+      logAggregationTimes++;
+
       try {
         writer =
             new LogWriter(this.conf, this.remoteNodeTmpLogFileForApp,
@@ -321,6 +332,7 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
         writer.writeApplicationOwner(this.userUgi.getShortUserName());
 
       } catch (IOException e1) {
+        logAggregationSucceedInThisCycle = false;
         LOG.error("Cannot create writer for app " + this.applicationId
             + ". Skip log upload this time. ", e1);
         return;
@@ -353,8 +365,9 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
 
       // Before upload logs, make sure the number of existing logs
       // is smaller than the configured NM log aggregation retention size.
-      if (uploadedLogsInThisCycle) {
+      if (uploadedLogsInThisCycle && logAggregationInRolling) {
         cleanOldLogs();
+        cleanupOldLogTimes++;
       }
 
       if (writer != null) {
@@ -369,20 +382,16 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
                 remoteNodeLogFileForApp.getName() + "_"
                     + currentTime);
 
-      String diagnosticMessage = "";
-      boolean logAggregationSucceedInThisCycle = true;
       final boolean rename = uploadedLogsInThisCycle;
       try {
         userUgi.doAs(new PrivilegedExceptionAction<Object>() {
           @Override
           public Object run() throws Exception {
             FileSystem remoteFS = remoteNodeLogFileForApp.getFileSystem(conf);
-            if (remoteFS.exists(remoteNodeTmpLogFileForApp)) {
-              if (rename) {
-                remoteFS.rename(remoteNodeTmpLogFileForApp, renamedPath);
-              } else {
-                remoteFS.delete(remoteNodeTmpLogFileForApp, false);
-              }
+            if (rename) {
+              remoteFS.rename(remoteNodeTmpLogFileForApp, renamedPath);
+            } else {
+              remoteFS.delete(remoteNodeTmpLogFileForApp, false);
             }
             return null;
           }
@@ -405,31 +414,37 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
         renameTemporaryLogFileFailed = true;
         logAggregationSucceedInThisCycle = false;
       }
-
-      LogAggregationReport report =
-          Records.newRecord(LogAggregationReport.class);
-      report.setApplicationId(appId);
-      report.setDiagnosticMessage(diagnosticMessage);
-      report.setLogAggregationStatus(logAggregationSucceedInThisCycle
-          ? LogAggregationStatus.RUNNING
-          : LogAggregationStatus.RUNNING_WITH_FAILURE);
-      this.context.getLogAggregationStatusForApps().add(report);
+    } finally {
+      LogAggregationStatus logAggregationStatus =
+          logAggregationSucceedInThisCycle
+              ? LogAggregationStatus.RUNNING
+              : LogAggregationStatus.RUNNING_WITH_FAILURE;
+      sendLogAggregationReport(logAggregationStatus, diagnosticMessage);
       if (appFinished) {
         // If the app is finished, one extra final report with log aggregation
         // status SUCCEEDED/FAILED will be sent to RM to inform the RM
         // that the log aggregation in this NM is completed.
-        LogAggregationReport finalReport =
-            Records.newRecord(LogAggregationReport.class);
-        finalReport.setApplicationId(appId);
-        finalReport.setLogAggregationStatus(renameTemporaryLogFileFailed
-            ? LogAggregationStatus.FAILED : LogAggregationStatus.SUCCEEDED);
-        this.context.getLogAggregationStatusForApps().add(finalReport);
+        LogAggregationStatus finalLogAggregationStatus =
+            renameTemporaryLogFileFailed || !logAggregationSucceedInThisCycle
+                ? LogAggregationStatus.FAILED
+                : LogAggregationStatus.SUCCEEDED;
+        sendLogAggregationReport(finalLogAggregationStatus, "");
       }
-    } finally {
+
       if (writer != null) {
         writer.close();
       }
     }
+  }
+
+  private void sendLogAggregationReport(
+      LogAggregationStatus logAggregationStatus, String diagnosticMessage) {
+    LogAggregationReport report =
+        Records.newRecord(LogAggregationReport.class);
+    report.setApplicationId(appId);
+    report.setDiagnosticMessage(diagnosticMessage);
+    report.setLogAggregationStatus(logAggregationStatus);
+    this.context.getLogAggregationStatusForApps().add(report);
   }
 
   private void cleanOldLogs() {
@@ -668,5 +683,16 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
   @VisibleForTesting
   public UserGroupInformation getUgi() {
     return this.userUgi;
+  }
+
+  @Private
+  @VisibleForTesting
+  public int getLogAggregationTimes() {
+    return this.logAggregationTimes;
+  }
+
+  @VisibleForTesting
+  int getCleanupOldLogTimes() {
+    return this.cleanupOldLogTimes;
   }
 }

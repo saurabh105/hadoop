@@ -34,6 +34,7 @@ import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceUtilization;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatResponse;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
@@ -187,6 +188,25 @@ public class NodeInfo {
     public List<Container> pullNewlyIncreasedContainers() {
       // TODO Auto-generated method stub
       return null;
+    }
+
+    @Override
+    public ResourceUtilization getAggregatedContainersUtilization() {
+      return null;
+    }
+
+    @Override
+    public ResourceUtilization getNodeUtilization() {
+      return null;
+    }
+
+    @Override
+    public long getUntrackedTimeStamp() {
+      return 0;
+    }
+
+    @Override
+    public void setUntrackedTimeStamp(long timeStamp) {
     }
   }
 

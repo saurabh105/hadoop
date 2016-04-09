@@ -19,8 +19,6 @@
 package org.apache.hadoop.yarn.server.resourcemanager;
 
 import java.io.IOException;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map.Entry;
 import java.util.Set;
@@ -34,9 +32,11 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.net.Node;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.service.CompositeService;
 import org.apache.hadoop.util.HostsFileReader;
+import org.apache.hadoop.util.Time;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -49,6 +49,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppNodeUpdateEvent.
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEventType;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImpl;
 
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.yarn.util.Clock;
@@ -62,15 +63,14 @@ public class NodesListManager extends CompositeService implements
 
   private HostsFileReader hostsReader;
   private Configuration conf;
-  private Set<RMNode> unusableRMNodesConcurrentSet = Collections
-      .newSetFromMap(new ConcurrentHashMap<RMNode,Boolean>());
-  
   private final RMContext rmContext;
 
   private String includesFile;
   private String excludesFile;
 
   private Resolver resolver;
+  private Timer removalTimer;
+  private int nodeRemovalCheckInterval;
 
   public NodesListManager(RMContext rmContext) {
     super(NodesListManager.class.getName());
@@ -88,7 +88,8 @@ public class NodesListManager extends CompositeService implements
     if (nodeIpCacheTimeout <= 0) {
       resolver = new DirectResolver();
     } else {
-      resolver = new CachedResolver(new SystemClock(), nodeIpCacheTimeout);
+      resolver =
+          new CachedResolver(SystemClock.getInstance(), nodeIpCacheTimeout);
       addIfService(resolver);
     }
 
@@ -100,14 +101,61 @@ public class NodesListManager extends CompositeService implements
           YarnConfiguration.DEFAULT_RM_NODES_EXCLUDE_FILE_PATH);
       this.hostsReader =
           createHostsFileReader(this.includesFile, this.excludesFile);
-      setDecomissionedNMsMetrics();
+      setDecomissionedNMs();
       printConfiguredHosts();
     } catch (YarnException ex) {
       disableHostsFileReader(ex);
     } catch (IOException ioe) {
       disableHostsFileReader(ioe);
     }
+
+    final int nodeRemovalTimeout =
+        conf.getInt(
+            YarnConfiguration.RM_NODEMANAGER_UNTRACKED_REMOVAL_TIMEOUT_MSEC,
+            YarnConfiguration.
+                DEFAULT_RM_NODEMANAGER_UNTRACKED_REMOVAL_TIMEOUT_MSEC);
+    nodeRemovalCheckInterval = (Math.min(nodeRemovalTimeout/2,
+        600000));
+    removalTimer = new Timer("Node Removal Timer");
+
+    removalTimer.schedule(new TimerTask() {
+      @Override
+      public void run() {
+        long now = Time.monotonicNow();
+        for (Map.Entry<NodeId, RMNode> entry :
+            rmContext.getInactiveRMNodes().entrySet()) {
+          NodeId nodeId = entry.getKey();
+          RMNode rmNode = entry.getValue();
+          if (isUntrackedNode(rmNode.getHostName())) {
+            if (rmNode.getUntrackedTimeStamp() == 0) {
+              rmNode.setUntrackedTimeStamp(now);
+            } else if (now - rmNode.getUntrackedTimeStamp() >
+                  nodeRemovalTimeout) {
+              RMNode result = rmContext.getInactiveRMNodes().remove(nodeId);
+              if (result != null) {
+                ClusterMetrics clusterMetrics = ClusterMetrics.getMetrics();
+                if (rmNode.getState() == NodeState.SHUTDOWN) {
+                  clusterMetrics.decrNumShutdownNMs();
+                } else {
+                  clusterMetrics.decrDecommisionedNMs();
+                }
+                LOG.info("Removed "+result.getHostName() +
+                    " from inactive nodes list");
+              }
+            }
+          } else {
+            rmNode.setUntrackedTimeStamp(0);
+          }
+        }
+      }
+    }, nodeRemovalCheckInterval, nodeRemovalCheckInterval);
+
     super.serviceInit(conf);
+  }
+
+  @Override
+  public void serviceStop() {
+    removalTimer.cancel();
   }
 
   private void printConfiguredHosts() {
@@ -133,10 +181,13 @@ public class NodesListManager extends CompositeService implements
 
     for (NodeId nodeId: rmContext.getRMNodes().keySet()) {
       if (!isValidNode(nodeId.getHost())) {
+        RMNodeEventType nodeEventType = isUntrackedNode(nodeId.getHost()) ?
+            RMNodeEventType.SHUTDOWN : RMNodeEventType.DECOMMISSION;
         this.rmContext.getDispatcher().getEventHandler().handle(
-            new RMNodeEvent(nodeId, RMNodeEventType.DECOMMISSION));
+            new RMNodeEvent(nodeId, nodeEventType));
       }
     }
+    updateInactiveNodes();
   }
 
   private void refreshHostsReader(Configuration yarnConf) throws IOException,
@@ -162,9 +213,25 @@ public class NodesListManager extends CompositeService implements
     }
   }
 
-  private void setDecomissionedNMsMetrics() {
+  private void setDecomissionedNMs() {
     Set<String> excludeList = hostsReader.getExcludedHosts();
-    ClusterMetrics.getMetrics().setDecommisionedNMs(excludeList.size());
+    for (final String host : excludeList) {
+      UnknownNodeId nodeId = new UnknownNodeId(host);
+      RMNodeImpl rmNode = new RMNodeImpl(nodeId,
+          rmContext, host, -1, -1, new UnknownNode(host), null, null);
+      rmContext.getInactiveRMNodes().put(nodeId, rmNode);
+      rmNode.handle(new RMNodeEvent(nodeId, RMNodeEventType.DECOMMISSION));
+    }
+  }
+
+  @VisibleForTesting
+  public int getNodeRemovalCheckInterval() {
+    return nodeRemovalCheckInterval;
+  }
+
+  @VisibleForTesting
+  public void setNodeRemovalCheckInterval(int interval) {
+    this.nodeRemovalCheckInterval = interval;
   }
 
   @VisibleForTesting
@@ -290,24 +357,12 @@ public class NodesListManager extends CompositeService implements
     }
   }
 
-  /**
-   * Provides the currently unusable nodes. Copies it into provided collection.
-   * @param unUsableNodes
-   *          Collection to which the unusable nodes are added
-   * @return number of unusable nodes added
-   */
-  public int getUnusableNodes(Collection<RMNode> unUsableNodes) {
-    unUsableNodes.addAll(unusableRMNodesConcurrentSet);
-    return unusableRMNodesConcurrentSet.size();
-  }
-
   @Override
   public void handle(NodesListManagerEvent event) {
     RMNode eventNode = event.getNode();
     switch (event.getType()) {
     case NODE_UNUSABLE:
       LOG.debug(eventNode + " reported unusable");
-      unusableRMNodesConcurrentSet.add(eventNode);
       for(RMApp app: rmContext.getRMApps().values()) {
         if (!app.isAppFinalStateStored()) {
           this.rmContext
@@ -320,10 +375,7 @@ public class NodesListManager extends CompositeService implements
       }
       break;
     case NODE_USABLE:
-      if (unusableRMNodesConcurrentSet.contains(eventNode)) {
-        LOG.debug(eventNode + " reported usable");
-        unusableRMNodesConcurrentSet.remove(eventNode);
-      }
+      LOG.debug(eventNode + " reported usable");
       for (RMApp app : rmContext.getRMApps().values()) {
         if (!app.isAppFinalStateStored()) {
           this.rmContext
@@ -354,7 +406,7 @@ public class NodesListManager extends CompositeService implements
           conf.get(YarnConfiguration.DEFAULT_RM_NODES_EXCLUDE_FILE_PATH);
       this.hostsReader =
           createHostsFileReader(this.includesFile, this.excludesFile);
-      setDecomissionedNMsMetrics();
+      setDecomissionedNMs();
     } catch (IOException ioe2) {
       // Should *never* happen
       this.hostsReader = null;
@@ -385,6 +437,33 @@ public class NodesListManager extends CompositeService implements
     return hostsReader;
   }
 
+  private void updateInactiveNodes() {
+    long now = Time.monotonicNow();
+    for(Entry<NodeId, RMNode> entry :
+        rmContext.getInactiveRMNodes().entrySet()) {
+      NodeId nodeId = entry.getKey();
+      RMNode rmNode = entry.getValue();
+      if (isUntrackedNode(nodeId.getHost()) &&
+          rmNode.getUntrackedTimeStamp() == 0) {
+        rmNode.setUntrackedTimeStamp(now);
+      }
+    }
+  }
+
+  public boolean isUntrackedNode(String hostName) {
+    boolean untracked;
+    String ip = resolver.resolve(hostName);
+
+    synchronized (hostsReader) {
+      Set<String> hostsList = hostsReader.getHosts();
+      Set<String> excludeList = hostsReader.getExcludedHosts();
+      untracked = !hostsList.isEmpty() &&
+          !hostsList.contains(hostName) && !hostsList.contains(ip) &&
+          !excludeList.contains(hostName) && !excludeList.contains(ip);
+    }
+    return untracked;
+  }
+
   /**
    * Refresh the nodes gracefully
    *
@@ -395,20 +474,22 @@ public class NodesListManager extends CompositeService implements
   public void refreshNodesGracefully(Configuration conf) throws IOException,
       YarnException {
     refreshHostsReader(conf);
-    for (Entry<NodeId, RMNode> entry:rmContext.getRMNodes().entrySet()) {
+    for (Entry<NodeId, RMNode> entry : rmContext.getRMNodes().entrySet()) {
       NodeId nodeId = entry.getKey();
       if (!isValidNode(nodeId.getHost())) {
+        RMNodeEventType nodeEventType = isUntrackedNode(nodeId.getHost()) ?
+            RMNodeEventType.SHUTDOWN : RMNodeEventType.GRACEFUL_DECOMMISSION;
         this.rmContext.getDispatcher().getEventHandler().handle(
-            new RMNodeEvent(nodeId, RMNodeEventType.GRACEFUL_DECOMMISSION));
+            new RMNodeEvent(nodeId, nodeEventType));
       } else {
         // Recommissioning the nodes
-        if (entry.getValue().getState() == NodeState.DECOMMISSIONING
-            || entry.getValue().getState() == NodeState.DECOMMISSIONED) {
+        if (entry.getValue().getState() == NodeState.DECOMMISSIONING) {
           this.rmContext.getDispatcher().getEventHandler()
               .handle(new RMNodeEvent(nodeId, RMNodeEventType.RECOMMISSION));
         }
       }
     }
+    updateInactiveNodes();
   }
 
   /**
@@ -432,9 +513,106 @@ public class NodesListManager extends CompositeService implements
   public void refreshNodesForcefully() {
     for (Entry<NodeId, RMNode> entry : rmContext.getRMNodes().entrySet()) {
       if (entry.getValue().getState() == NodeState.DECOMMISSIONING) {
+        RMNodeEventType nodeEventType =
+            isUntrackedNode(entry.getKey().getHost()) ?
+            RMNodeEventType.SHUTDOWN : RMNodeEventType.DECOMMISSION;
         this.rmContext.getDispatcher().getEventHandler().handle(
-            new RMNodeEvent(entry.getKey(), RMNodeEventType.DECOMMISSION));
+            new RMNodeEvent(entry.getKey(), nodeEventType));
       }
+    }
+  }
+
+  /**
+   * A NodeId instance needed upon startup for populating inactive nodes Map.
+   * It only knows the hostname/ip and marks the port to -1 or invalid.
+   */
+  public static class UnknownNodeId extends NodeId {
+
+    private String host;
+
+    public UnknownNodeId(String host) {
+      this.host = host;
+    }
+
+    @Override
+    public String getHost() {
+      return this.host;
+    }
+
+    @Override
+    protected void setHost(String hst) {
+
+    }
+
+    @Override
+    public int getPort() {
+      return -1;
+    }
+
+    @Override
+    protected void setPort(int port) {
+
+    }
+
+    @Override
+    protected void build() {
+
+    }
+  }
+
+  /**
+   * A Node instance needed upon startup for populating inactive nodes Map.
+   * It only knows its hostname/ip.
+   */
+  private static class UnknownNode implements Node {
+
+    private String host;
+
+    public UnknownNode(String host) {
+      this.host = host;
+    }
+
+    @Override
+    public String getNetworkLocation() {
+      return null;
+    }
+
+    @Override
+    public void setNetworkLocation(String location) {
+
+    }
+
+    @Override
+    public String getName() {
+      return host;
+    }
+
+    @Override
+    public Node getParent() {
+      return null;
+    }
+
+    @Override
+    public void setParent(Node parent) {
+
+    }
+
+    @Override
+    public int getLevel() {
+      return 0;
+    }
+
+    @Override
+    public void setLevel(int i) {
+
+    }
+
+    public String getHost() {
+      return host;
+    }
+
+    public void setHost(String hst) {
+      this.host = hst;
     }
   }
 }

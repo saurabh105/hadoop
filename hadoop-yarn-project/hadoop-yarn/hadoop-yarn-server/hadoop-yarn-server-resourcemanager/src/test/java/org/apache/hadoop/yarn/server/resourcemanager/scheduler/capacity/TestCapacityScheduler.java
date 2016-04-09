@@ -62,6 +62,7 @@ import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueState;
@@ -71,6 +72,9 @@ import org.apache.hadoop.yarn.api.records.ResourceOption;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
+import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.Event;
+import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
@@ -106,6 +110,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEven
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeResourceUpdateEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
@@ -140,11 +145,11 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
-
 
 public class TestCapacityScheduler {
   private static final Log LOG = LogFactory.getLog(TestCapacityScheduler.class);
@@ -1065,9 +1070,33 @@ public class TestCapacityScheduler {
         RegisterApplicationMasterRequest.newInstance("localhost", 12345, "");
     client.registerApplicationMaster(request);
 
+    // Allocate a container
+    List<ResourceRequest> asks = Collections.singletonList(
+        ResourceRequest.newInstance(
+            Priority.newInstance(1), "*", Resources.createResource(2 * GB), 1));
+    AllocateRequest allocateRequest =
+        AllocateRequest.newInstance(0, 0.0f, asks, null, null);
+    client.allocate(allocateRequest);
+
+    // Make sure the container is allocated in RM
+    nm1.nodeHeartbeat(true);
+    ContainerId containerId2 =
+        ContainerId.newContainerId(applicationAttemptId, 2);
+    Assert.assertTrue(rm.waitForState(nm1, containerId2,
+        RMContainerState.ALLOCATED, 10 * 1000));
+
+    // Acquire the container
+    allocateRequest = AllocateRequest.newInstance(1, 0.0f, null, null, null);
+    client.allocate(allocateRequest);
+
+    // Launch the container
+    final CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
+    RMContainer rmContainer = cs.getRMContainer(containerId2);
+    rmContainer.handle(
+        new RMContainerEvent(containerId2, RMContainerEventType.LAUNCHED));
+
     // grab the scheduler lock from another thread
     // and verify an allocate call in this thread doesn't block on it
-    final CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
     final CyclicBarrier barrier = new CyclicBarrier(2);
     Thread otherThread = new Thread(new Runnable() {
       @Override
@@ -1076,9 +1105,7 @@ public class TestCapacityScheduler {
           try {
             barrier.await();
             barrier.await();
-          } catch (InterruptedException e) {
-            e.printStackTrace();
-          } catch (BrokenBarrierException e) {
+          } catch (InterruptedException | BrokenBarrierException e) {
             e.printStackTrace();
           }
         }
@@ -1086,8 +1113,9 @@ public class TestCapacityScheduler {
     });
     otherThread.start();
     barrier.await();
-    AllocateRequest allocateRequest =
-        AllocateRequest.newInstance(0, 0.0f, null, null, null);
+    List<ContainerId> release = Collections.singletonList(containerId2);
+    allocateRequest =
+        AllocateRequest.newInstance(2, 0.0f, null, release, null);
     client.allocate(allocateRequest);
     barrier.await();
     otherThread.join();
@@ -1160,7 +1188,7 @@ public class TestCapacityScheduler {
 
     // kill the 3 containers
     for (Container c : allocatedContainers) {
-      cs.killContainer(schedulerAppAttempt.getRMContainer(c.getId()));
+      cs.markContainerForKillable(schedulerAppAttempt.getRMContainer(c.getId()));
     }
 
     // check values
@@ -1169,7 +1197,7 @@ public class TestCapacityScheduler {
         Resource.newInstance(CONTAINER_MEMORY * 3, 3), false, 3);
 
     // kill app0-attempt0 AM container
-    cs.killContainer(schedulerAppAttempt.getRMContainer(app0
+    cs.markContainerForKillable(schedulerAppAttempt.getRMContainer(app0
         .getCurrentAppAttempt().getMasterContainer().getId()));
 
     // wait for app0 failed
@@ -1192,7 +1220,7 @@ public class TestCapacityScheduler {
     allocatedContainers =
         am1.allocateAndWaitForContainers(3, CONTAINER_MEMORY, nm1);
     for (Container c : allocatedContainers) {
-      cs.killContainer(schedulerAppAttempt.getRMContainer(c.getId()));
+      cs.markContainerForKillable(schedulerAppAttempt.getRMContainer(c.getId()));
     }
 
     // check values
@@ -1241,7 +1269,7 @@ public class TestCapacityScheduler {
     }
 
     // Call killContainer to preempt the container
-    cs.killContainer(rmContainer);
+    cs.markContainerForKillable(rmContainer);
 
     Assert.assertEquals(3, requests.size());
     for (ResourceRequest request : requests) {
@@ -3247,5 +3275,89 @@ public class TestCapacityScheduler {
     } else {
       Assert.fail("Cannot find RMContainer");
     }
+  }
+
+  @Test
+  public void testResourceUpdateDecommissioningNode() throws Exception {
+    // Mock the RMNodeResourceUpdate event handler to update SchedulerNode
+    // to have 0 available resource
+    RMContext spyContext = Mockito.spy(resourceManager.getRMContext());
+    Dispatcher mockDispatcher = mock(AsyncDispatcher.class);
+    when(mockDispatcher.getEventHandler()).thenReturn(new EventHandler() {
+      @Override
+      public void handle(Event event) {
+        if (event instanceof RMNodeResourceUpdateEvent) {
+          RMNodeResourceUpdateEvent resourceEvent =
+              (RMNodeResourceUpdateEvent) event;
+          resourceManager
+              .getResourceScheduler()
+              .getSchedulerNode(resourceEvent.getNodeId())
+              .setTotalResource(resourceEvent.getResourceOption().getResource());
+        }
+      }
+    });
+    Mockito.doReturn(mockDispatcher).when(spyContext).getDispatcher();
+    ((CapacityScheduler) resourceManager.getResourceScheduler())
+        .setRMContext(spyContext);
+    ((AsyncDispatcher) mockDispatcher).start();
+    // Register node
+    String host_0 = "host_0";
+    org.apache.hadoop.yarn.server.resourcemanager.NodeManager nm_0 =
+        registerNode(host_0, 1234, 2345, NetworkTopology.DEFAULT_RACK,
+            Resources.createResource(8 * GB, 4));
+    // ResourceRequest priorities
+    Priority priority_0 =
+        org.apache.hadoop.yarn.server.resourcemanager.resource.Priority
+            .create(0);
+
+    // Submit an application
+    Application application_0 =
+        new Application("user_0", "a1", resourceManager);
+    application_0.submit();
+
+    application_0.addNodeManager(host_0, 1234, nm_0);
+
+    Resource capability_0_0 = Resources.createResource(1 * GB, 1);
+    application_0.addResourceRequestSpec(priority_0, capability_0_0);
+
+    Task task_0_0 =
+        new Task(application_0, priority_0, new String[] { host_0 });
+    application_0.addTask(task_0_0);
+
+    // Send resource requests to the scheduler
+    application_0.schedule();
+
+    nodeUpdate(nm_0);
+    // Kick off another heartbeat with the node state mocked to decommissioning
+    // This should update the schedulernodes to have 0 available resource
+    RMNode spyNode =
+        Mockito.spy(resourceManager.getRMContext().getRMNodes()
+            .get(nm_0.getNodeId()));
+    when(spyNode.getState()).thenReturn(NodeState.DECOMMISSIONING);
+    resourceManager.getResourceScheduler().handle(
+        new NodeUpdateSchedulerEvent(spyNode));
+
+    // Get allocations from the scheduler
+    application_0.schedule();
+
+    // Check the used resource is 1 GB 1 core
+    Assert.assertEquals(1 * GB, nm_0.getUsed().getMemory());
+    Resource usedResource =
+        resourceManager.getResourceScheduler()
+            .getSchedulerNode(nm_0.getNodeId()).getAllocatedResource();
+    Assert.assertEquals(usedResource.getMemory(), 1 * GB);
+    Assert.assertEquals(usedResource.getVirtualCores(), 1);
+    // Check total resource of scheduler node is also changed to 1 GB 1 core
+    Resource totalResource =
+        resourceManager.getResourceScheduler()
+            .getSchedulerNode(nm_0.getNodeId()).getTotalResource();
+    Assert.assertEquals(totalResource.getMemory(), 1 * GB);
+    Assert.assertEquals(totalResource.getVirtualCores(), 1);
+    // Check the available resource is 0/0
+    Resource availableResource =
+        resourceManager.getResourceScheduler()
+            .getSchedulerNode(nm_0.getNodeId()).getUnallocatedResource();
+    Assert.assertEquals(availableResource.getMemory(), 0);
+    Assert.assertEquals(availableResource.getVirtualCores(), 0);
   }
 }

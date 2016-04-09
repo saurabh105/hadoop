@@ -18,12 +18,29 @@
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity;
 
 
+import static org.junit.Assert.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
+
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.Priority;
+import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.factories.RecordFactory;
+import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.MockAM;
 import org.apache.hadoop.yarn.server.resourcemanager.MockNM;
 import org.apache.hadoop.yarn.server.resourcemanager.MockRM;
@@ -31,10 +48,21 @@ import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.NullRMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceLimits;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceUsage;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt.AMState;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
+import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
+import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
+import org.apache.hadoop.yarn.util.resource.Resources;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Matchers;
+import org.mockito.Mockito;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -46,7 +74,8 @@ public class TestApplicationLimitsByPartition {
   RMNodeLabelsManager mgr;
   private YarnConfiguration conf;
 
-  RMContext rmContext = null;
+  private final ResourceCalculator resourceCalculator =
+      new DefaultResourceCalculator();
 
   @Before
   public void setUp() throws IOException {
@@ -120,15 +149,13 @@ public class TestApplicationLimitsByPartition {
 
     // Submit app1 with 1Gb AM resource to Queue A1 for label X
     RMApp app1 = rm1.submitApp(GB, "app", "user", null, "a1", "x");
-    MockRM.launchAndRegisterAM(app1, rm1, nm1);
 
     // Submit app2 with 1Gb AM resource to Queue A1 for label X
     RMApp app2 = rm1.submitApp(GB, "app", "user", null, "a1", "x");
-    MockRM.launchAndRegisterAM(app2, rm1, nm1);
 
     // Submit 3rd app to Queue A1 for label X, and this will be pending as
     // AM limit is already crossed for label X. (2GB)
-    rm1.submitApp(GB, "app", "user", null, "a1", "x");
+    RMApp pendingApp = rm1.submitApp(GB, "app", "user", null, "a1", "x");
 
     CapacityScheduler cs = (CapacityScheduler) rm1.getResourceScheduler();
     LeafQueue leafQueue = (LeafQueue) cs.getQueue("a1");
@@ -138,6 +165,16 @@ public class TestApplicationLimitsByPartition {
     // pending.
     Assert.assertEquals(2, leafQueue.getNumActiveApplications());
     Assert.assertEquals(1, leafQueue.getNumPendingApplications());
+    Assert.assertTrue("AM diagnostics not set properly", app1.getDiagnostics()
+        .toString().contains(AMState.ACTIVATED.getDiagnosticMessage()));
+    Assert.assertTrue("AM diagnostics not set properly", app2.getDiagnostics()
+        .toString().contains(AMState.ACTIVATED.getDiagnosticMessage()));
+    Assert.assertTrue("AM diagnostics not set properly",
+        pendingApp.getDiagnostics().toString()
+            .contains(AMState.INACTIVATED.getDiagnosticMessage()));
+    Assert.assertTrue("AM diagnostics not set properly",
+        pendingApp.getDiagnostics().toString().contains(
+            CSAMContainerLaunchDiagnosticsConstants.QUEUE_AM_RESOURCE_LIMIT_EXCEED));
 
     // Now verify the same test case in Queue C1 where label is not configured.
     // Submit an app to Queue C1 with empty label
@@ -150,7 +187,7 @@ public class TestApplicationLimitsByPartition {
 
     // Submit 3rd app to Queue C1. This will be pending as Queue's am-limit
     // is reached.
-    rm1.submitApp(GB, "app", "user", null, "c1");
+    pendingApp = rm1.submitApp(GB, "app", "user", null, "c1");
 
     leafQueue = (LeafQueue) cs.getQueue("c1");
     Assert.assertNotNull(leafQueue);
@@ -159,6 +196,12 @@ public class TestApplicationLimitsByPartition {
     // is reached.
     Assert.assertEquals(2, leafQueue.getNumActiveApplications());
     Assert.assertEquals(1, leafQueue.getNumPendingApplications());
+    Assert.assertTrue("AM diagnostics not set properly",
+        pendingApp.getDiagnostics().toString()
+            .contains(AMState.INACTIVATED.getDiagnosticMessage()));
+    Assert.assertTrue("AM diagnostics not set properly",
+        pendingApp.getDiagnostics().toString().contains(
+            CSAMContainerLaunchDiagnosticsConstants.QUEUE_AM_RESOURCE_LIMIT_EXCEED));
 
     rm1.killApp(app3.getApplicationId());
     Thread.sleep(1000);
@@ -288,11 +331,10 @@ public class TestApplicationLimitsByPartition {
 
     // Submit app1 (2 GB) to Queue A1 and label X
     RMApp app1 = rm1.submitApp(2 * GB, "app", "user", null, "a1", "x");
-    MockRM.launchAndRegisterAM(app1, rm1, nm1);
 
     // Submit 2nd app to label "X" with one GB. Since queue am-limit is 2GB,
     // 2nd app will be pending and first one will get activated.
-    rm1.submitApp(GB, "app", "user", null, "a1", "x");
+    RMApp pendingApp = rm1.submitApp(GB, "app", "user", null, "a1", "x");
 
     CapacityScheduler cs = (CapacityScheduler) rm1.getResourceScheduler();
     LeafQueue leafQueue = (LeafQueue) cs.getQueue("a1");
@@ -302,6 +344,14 @@ public class TestApplicationLimitsByPartition {
     // used for partition "x" also.
     Assert.assertEquals(1, leafQueue.getNumActiveApplications());
     Assert.assertEquals(1, leafQueue.getNumPendingApplications());
+    Assert.assertTrue("AM diagnostics not set properly", app1.getDiagnostics()
+        .toString().contains(AMState.ACTIVATED.getDiagnosticMessage()));
+    Assert.assertTrue("AM diagnostics not set properly",
+        pendingApp.getDiagnostics().toString()
+            .contains(AMState.INACTIVATED.getDiagnosticMessage()));
+    Assert.assertTrue("AM diagnostics not set properly",
+        pendingApp.getDiagnostics().toString()
+            .contains(CSAMContainerLaunchDiagnosticsConstants.QUEUE_AM_RESOURCE_LIMIT_EXCEED));
     rm1.close();
   }
 
@@ -381,7 +431,7 @@ public class TestApplicationLimitsByPartition {
     // 4Gb -> 40% of label "X" in queue A1
     // Since we have 2 users, 50% of 4Gb will be max for each user. Here user1
     // has already crossed this 2GB limit, hence this app will be pending.
-    rm1.submitApp(GB, "app", user_1, null, "a1", "x");
+    RMApp pendingApp = rm1.submitApp(GB, "app", user_1, null, "a1", "x");
 
     // Verify active applications count per user and also in queue level.
     Assert.assertEquals(3, leafQueue.getNumActiveApplications());
@@ -389,6 +439,14 @@ public class TestApplicationLimitsByPartition {
     Assert.assertEquals(2, leafQueue.getNumActiveApplications(user_1));
     Assert.assertEquals(1, leafQueue.getNumPendingApplications(user_1));
     Assert.assertEquals(1, leafQueue.getNumPendingApplications());
+
+    //verify Diagnostic messages
+    Assert.assertTrue("AM diagnostics not set properly",
+        pendingApp.getDiagnostics().toString()
+            .contains(AMState.INACTIVATED.getDiagnosticMessage()));
+    Assert.assertTrue("AM diagnostics not set properly",
+        pendingApp.getDiagnostics().toString().contains(
+            CSAMContainerLaunchDiagnosticsConstants.USER_AM_RESOURCE_LIMIT_EXCEED));
     rm1.close();
   }
 
@@ -507,5 +565,175 @@ public class TestApplicationLimitsByPartition {
     Assert.assertEquals(1, leafQueue.getNumPendingApplications());
 
     rm1.close();
+  }
+
+  @Test
+  public void testHeadroom() throws Exception {
+    /*
+     * Test Case: Verify Headroom calculated is sum of headrooms for each
+     * partition requested. So submit a app with requests for default partition
+     * and 'x' partition, so the total headroom for the user should be sum of
+     * the head room for both labels.
+     */
+
+    simpleNodeLabelMappingToManager();
+    CapacitySchedulerConfiguration csConf =
+        (CapacitySchedulerConfiguration) TestUtils
+            .getComplexConfigurationWithQueueLabels(conf);
+    final String A1 = CapacitySchedulerConfiguration.ROOT + ".a" + ".a1";
+    final String B2 = CapacitySchedulerConfiguration.ROOT + ".b" + ".b2";
+    csConf.setUserLimit(A1, 25);
+    csConf.setUserLimit(B2, 25);
+
+    YarnConfiguration conf = new YarnConfiguration();
+
+    CapacitySchedulerContext csContext = mock(CapacitySchedulerContext.class);
+    when(csContext.getConfiguration()).thenReturn(csConf);
+    when(csContext.getConf()).thenReturn(conf);
+    when(csContext.getMinimumResourceCapability())
+        .thenReturn(Resources.createResource(GB));
+    when(csContext.getMaximumResourceCapability())
+        .thenReturn(Resources.createResource(16 * GB));
+    when(csContext.getNonPartitionedQueueComparator())
+        .thenReturn(CapacityScheduler.nonPartitionedQueueComparator);
+    when(csContext.getResourceCalculator()).thenReturn(resourceCalculator);
+    RMContext rmContext = TestUtils.getMockRMContext();
+    RMContext spyRMContext = spy(rmContext);
+    when(spyRMContext.getNodeLabelManager()).thenReturn(mgr);
+    when(csContext.getRMContext()).thenReturn(spyRMContext);
+
+    mgr.activateNode(NodeId.newInstance("h0", 0),
+        Resource.newInstance(160 * GB, 16)); // default Label
+    mgr.activateNode(NodeId.newInstance("h1", 0),
+        Resource.newInstance(160 * GB, 16)); // label x
+    mgr.activateNode(NodeId.newInstance("h2", 0),
+        Resource.newInstance(160 * GB, 16)); // label y
+
+    // Say cluster has 100 nodes of 16G each
+    Resource clusterResource = Resources.createResource(160 * GB);
+    when(csContext.getClusterResource()).thenReturn(clusterResource);
+
+    Map<String, CSQueue> queues = new HashMap<String, CSQueue>();
+    CSQueue rootQueue = CapacityScheduler.parseQueue(csContext, csConf, null,
+        "root", queues, queues, TestUtils.spyHook);
+
+    ResourceUsage queueResUsage = rootQueue.getQueueResourceUsage();
+    when(csContext.getClusterResourceUsage())
+        .thenReturn(queueResUsage);
+
+    // Manipulate queue 'a'
+    LeafQueue queue = TestLeafQueue.stubLeafQueue((LeafQueue) queues.get("b2"));
+    queue.updateClusterResource(clusterResource,
+        new ResourceLimits(clusterResource));
+
+    String rack_0 = "rack_0";
+    FiCaSchedulerNode node_0 = TestUtils.getMockNode("h0", rack_0, 0, 160 * GB);
+    FiCaSchedulerNode node_1 = TestUtils.getMockNode("h1", rack_0, 0, 160 * GB);
+
+    final String user_0 = "user_0";
+    final String user_1 = "user_1";
+
+    RecordFactory recordFactory = RecordFactoryProvider.getRecordFactory(null);
+
+    ConcurrentMap<ApplicationId, RMApp> spyApps =
+        spy(new ConcurrentHashMap<ApplicationId, RMApp>());
+    RMApp rmApp = mock(RMApp.class);
+    ResourceRequest amResourceRequest = mock(ResourceRequest.class);
+    Resource amResource = Resources.createResource(0, 0);
+    when(amResourceRequest.getCapability()).thenReturn(amResource);
+    when(rmApp.getAMResourceRequest()).thenReturn(amResourceRequest);
+    Mockito.doReturn(rmApp).when(spyApps).get((ApplicationId) Matchers.any());
+    when(spyRMContext.getRMApps()).thenReturn(spyApps);
+    RMAppAttempt rmAppAttempt = mock(RMAppAttempt.class);
+    when(rmApp.getRMAppAttempt((ApplicationAttemptId) Matchers.any()))
+        .thenReturn(rmAppAttempt);
+    when(rmApp.getCurrentAppAttempt()).thenReturn(rmAppAttempt);
+    Mockito.doReturn(rmApp).when(spyApps).get((ApplicationId) Matchers.any());
+    Mockito.doReturn(true).when(spyApps)
+        .containsKey((ApplicationId) Matchers.any());
+
+    Priority priority_1 = TestUtils.createMockPriority(1);
+
+    // Submit first application with some resource-requests from user_0,
+    // and check headroom
+    final ApplicationAttemptId appAttemptId_0_0 =
+        TestUtils.getMockApplicationAttemptId(0, 0);
+    FiCaSchedulerApp app_0_0 = new FiCaSchedulerApp(appAttemptId_0_0, user_0,
+        queue, queue.getActiveUsersManager(), spyRMContext);
+    queue.submitApplicationAttempt(app_0_0, user_0);
+
+    List<ResourceRequest> app_0_0_requests = new ArrayList<ResourceRequest>();
+    app_0_0_requests.add(TestUtils.createResourceRequest(ResourceRequest.ANY,
+        1 * GB, 2, true, priority_1, recordFactory));
+    app_0_0.updateResourceRequests(app_0_0_requests);
+
+    // Schedule to compute
+    queue.assignContainers(clusterResource, node_0,
+        new ResourceLimits(clusterResource),
+        SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY);
+    //head room = queue capacity = 50 % 90% 160 GB
+    Resource expectedHeadroom =
+        Resources.createResource((int) (0.5 * 0.9 * 160) * GB, 1);
+    assertEquals(expectedHeadroom, app_0_0.getHeadroom());
+
+    // Submit second application from user_0, check headroom
+    final ApplicationAttemptId appAttemptId_0_1 =
+        TestUtils.getMockApplicationAttemptId(1, 0);
+    FiCaSchedulerApp app_0_1 = new FiCaSchedulerApp(appAttemptId_0_1, user_0,
+        queue, queue.getActiveUsersManager(), spyRMContext);
+    queue.submitApplicationAttempt(app_0_1, user_0);
+
+    List<ResourceRequest> app_0_1_requests = new ArrayList<ResourceRequest>();
+    app_0_1_requests.add(TestUtils.createResourceRequest(ResourceRequest.ANY,
+        1 * GB, 2, true, priority_1, recordFactory));
+    app_0_1_requests.add(TestUtils.createResourceRequest(ResourceRequest.ANY,
+        1 * GB, 2, true, priority_1, recordFactory, "y"));
+    app_0_1.updateResourceRequests(app_0_1_requests);
+
+    // Schedule to compute
+    queue.assignContainers(clusterResource, node_0,
+        new ResourceLimits(clusterResource),
+        SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY); // Schedule to compute
+    queue.assignContainers(clusterResource, node_1,
+        new ResourceLimits(clusterResource),
+        SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY); // Schedule to compute
+    assertEquals(expectedHeadroom, app_0_0.getHeadroom());// no change
+    //head room for default label + head room for y partition
+    //head room for y partition = 100% 50%(b queue capacity ) *  160 * GB
+    Resource expectedHeadroomWithReqInY =
+        Resources.add(Resources.createResource((int) (0.5 * 160) * GB, 1), expectedHeadroom);
+    assertEquals(expectedHeadroomWithReqInY, app_0_1.getHeadroom());
+
+    // Submit first application from user_1, check for new headroom
+    final ApplicationAttemptId appAttemptId_1_0 =
+        TestUtils.getMockApplicationAttemptId(2, 0);
+    FiCaSchedulerApp app_1_0 = new FiCaSchedulerApp(appAttemptId_1_0, user_1,
+        queue, queue.getActiveUsersManager(), spyRMContext);
+    queue.submitApplicationAttempt(app_1_0, user_1);
+
+    List<ResourceRequest> app_1_0_requests = new ArrayList<ResourceRequest>();
+    app_1_0_requests.add(TestUtils.createResourceRequest(ResourceRequest.ANY,
+        1 * GB, 2, true, priority_1, recordFactory));
+    app_1_0_requests.add(TestUtils.createResourceRequest(ResourceRequest.ANY,
+        1 * GB, 2, true, priority_1, recordFactory, "y"));
+    app_1_0.updateResourceRequests(app_1_0_requests);
+
+    // Schedule to compute
+    queue.assignContainers(clusterResource, node_0,
+        new ResourceLimits(clusterResource),
+        SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY); // Schedule to compute
+    //head room = queue capacity = (50 % 90% 160 GB)/2 (for 2 users)
+    expectedHeadroom =
+        Resources.createResource((int) (0.5 * 0.9 * 160 * 0.5) * GB, 1);
+    //head room for default label + head room for y partition
+    //head room for y partition = 100% 50%(b queue capacity ) *  160 * GB
+    expectedHeadroomWithReqInY =
+        Resources.add(Resources.createResource((int) (0.5 * 0.5 * 160) * GB, 1),
+            expectedHeadroom);
+    assertEquals(expectedHeadroom, app_0_0.getHeadroom());
+    assertEquals(expectedHeadroomWithReqInY, app_0_1.getHeadroom());
+    assertEquals(expectedHeadroomWithReqInY, app_1_0.getHeadroom());
+
+
   }
 }

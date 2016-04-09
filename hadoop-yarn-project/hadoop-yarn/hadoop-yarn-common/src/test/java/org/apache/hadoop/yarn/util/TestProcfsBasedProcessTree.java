@@ -227,7 +227,6 @@ public class TestProcfsBasedProcessTree {
     // ProcessTree is gone now. Any further calls should be sane.
     p.updateProcessTree();
     Assert.assertFalse("ProcessTree must have been gone", isAlive(pid));
-    
     Assert.assertTrue(
       "vmem for the gone-process is " + p.getVirtualMemorySize()
           + " . It should be zero.", p.getVirtualMemorySize() == 0);
@@ -395,7 +394,7 @@ public class TestProcfsBasedProcessTree {
 
     // test processes
     String[] pids = { "100", "200", "300", "400" };
-    ControlledClock testClock = new ControlledClock(new SystemClock());
+    ControlledClock testClock = new ControlledClock();
     testClock.setTime(0);
     // create the fake procfs root directory.
     File procfsRootDir = new File(TEST_ROOT_DIR, "proc");
@@ -575,13 +574,12 @@ public class TestProcfsBasedProcessTree {
       // crank up the process tree class.
       ProcfsBasedProcessTree processTree =
           createProcessTree("100", procfsRootDir.getAbsolutePath(),
-              new SystemClock());
+              SystemClock.getInstance());
       setSmapsInProceTree(processTree, smapEnabled);
 
       // verify virtual memory
       Assert.assertEquals("Virtual memory does not match", 700000L,
         processTree.getVirtualMemorySize());
-      
       Assert.assertEquals("Virtual memory (old API) does not match", 700000L,
         processTree.getCumulativeVmem());
 
@@ -602,10 +600,8 @@ public class TestProcfsBasedProcessTree {
       processTree.updateProcessTree();
       Assert.assertEquals("vmem does not include new process",
         1200000L, processTree.getVirtualMemorySize());
-      
       Assert.assertEquals("vmem (old API) does not include new process",
         1200000L, processTree.getCumulativeVmem());
-      
       if (!smapEnabled) {
         long cumuRssMem =
             ProcfsBasedProcessTree.PAGE_SIZE > 0
@@ -632,7 +628,6 @@ public class TestProcfsBasedProcessTree {
       Assert.assertEquals(
           "vmem (old API) shouldn't have included new process", 700000L,
           processTree.getCumulativeVmem(1));
-      
       if (!smapEnabled) {
         long cumuRssMem =
             ProcfsBasedProcessTree.PAGE_SIZE > 0
@@ -645,7 +640,6 @@ public class TestProcfsBasedProcessTree {
         Assert.assertEquals(
           "rssmem (old API) shouldn't have included new process", cumuRssMem,
           processTree.getCumulativeRssmem(1));
-        
       } else {
         Assert.assertEquals(
           "rssmem shouldn't have included new process",
@@ -676,12 +670,10 @@ public class TestProcfsBasedProcessTree {
       Assert.assertEquals(
         "vmem shouldn't have included new processes", 700000L,
         processTree.getVirtualMemorySize(2));
-      
       // verify old API
       Assert.assertEquals(
         "vmem (old API) shouldn't have included new processes", 700000L,
         processTree.getCumulativeVmem(2));
-      
       if (!smapEnabled) {
         long cumuRssMem =
             ProcfsBasedProcessTree.PAGE_SIZE > 0
@@ -774,7 +766,8 @@ public class TestProcfsBasedProcessTree {
       setupProcfsRootDir(procfsRootDir);
 
       // crank up the process tree class.
-      createProcessTree(pid, procfsRootDir.getAbsolutePath(), new SystemClock());
+      createProcessTree(pid, procfsRootDir.getAbsolutePath(),
+          SystemClock.getInstance());
 
       // Let us not create stat file for pid 100.
       Assert.assertTrue(ProcfsBasedProcessTree.checkPidPgrpidForMatch(pid,
@@ -844,7 +837,7 @@ public class TestProcfsBasedProcessTree {
 
       ProcfsBasedProcessTree processTree =
           createProcessTree("100", procfsRootDir.getAbsolutePath(),
-              new SystemClock());
+              SystemClock.getInstance());
       // build the process tree.
       processTree.updateProcessTree();
 

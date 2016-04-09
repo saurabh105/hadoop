@@ -86,6 +86,7 @@ import org.mortbay.jetty.servlet.AbstractSessionManager;
 import org.mortbay.jetty.servlet.Context;
 import org.mortbay.jetty.servlet.DefaultServlet;
 import org.mortbay.jetty.servlet.FilterHolder;
+import org.mortbay.jetty.servlet.SessionHandler;
 import org.mortbay.jetty.servlet.FilterMapping;
 import org.mortbay.jetty.servlet.ServletHandler;
 import org.mortbay.jetty.servlet.ServletHolder;
@@ -171,6 +172,7 @@ public final class HttpServer2 implements FilterContainer {
     private String hostName;
     private boolean disallowFallbackToRandomSignerSecretProvider;
     private String authFilterConfigurationPrefix = "hadoop.http.authentication.";
+    private String excludeCiphers;
 
     public Builder setName(String name){
       this.name = name;
@@ -275,6 +277,11 @@ public final class HttpServer2 implements FilterContainer {
       return this;
     }
 
+    public Builder excludeCiphers(String pExcludeCiphers) {
+      this.excludeCiphers = pExcludeCiphers;
+      return this;
+    }
+
     public HttpServer2 build() throws IOException {
       Preconditions.checkNotNull(name, "name is not set");
       Preconditions.checkState(!endpoints.isEmpty(), "No endpoints specified");
@@ -315,6 +322,12 @@ public final class HttpServer2 implements FilterContainer {
             c.setTruststoreType(trustStoreType);
             c.setTrustPassword(trustStorePassword);
           }
+
+          if(null != excludeCiphers && !excludeCiphers.isEmpty()) {
+            c.setExcludeCipherSuites(excludeCiphers.split(","));
+            LOG.info("Excluded Cipher List:" + excludeCiphers);
+          }
+
           listener = c;
 
         } else {
@@ -506,9 +519,13 @@ public final class HttpServer2 implements FilterContainer {
    */
   protected void addDefaultApps(ContextHandlerCollection parent,
       final String appDir, Configuration conf) throws IOException {
-    // set up the context for "/logs/" if "hadoop.log.dir" property is defined.
+    // set up the context for "/logs/" if "hadoop.log.dir" property is defined
+    // and it's enabled.
     String logDir = System.getProperty("hadoop.log.dir");
-    if (logDir != null) {
+    boolean logsEnabled = conf.getBoolean(
+        CommonConfigurationKeys.HADOOP_HTTP_LOGS_ENABLED,
+        CommonConfigurationKeys.HADOOP_HTTP_LOGS_ENABLED_DEFAULT);
+    if (logDir != null && logsEnabled) {
       Context logContext = new Context(parent, "/logs");
       logContext.setResourceBase(logDir);
       logContext.addServlet(AdminAuthorizedServlet.class, "/*");
@@ -521,6 +538,14 @@ public final class HttpServer2 implements FilterContainer {
             "org.mortbay.jetty.servlet.Default.aliases", "true");
       }
       logContext.setDisplayName("logs");
+      SessionHandler handler = new SessionHandler();
+      SessionManager sm = handler.getSessionManager();
+      if (sm instanceof AbstractSessionManager) {
+        AbstractSessionManager asm = (AbstractSessionManager) sm;
+        asm.setHttpOnly(true);
+        asm.setSecureCookies(true);
+      }
+      logContext.setSessionHandler(handler);
       setContextAttributes(logContext, conf);
       addNoCacheFilter(webAppContext);
       defaultContexts.put(logContext, true);
@@ -530,6 +555,17 @@ public final class HttpServer2 implements FilterContainer {
     staticContext.setResourceBase(appDir + "/static");
     staticContext.addServlet(DefaultServlet.class, "/*");
     staticContext.setDisplayName("static");
+    @SuppressWarnings("unchecked")
+    Map<String, String> params = staticContext.getInitParams();
+    params.put("org.mortbay.jetty.servlet.Default.dirAllowed", "false");
+    SessionHandler handler = new SessionHandler();
+    SessionManager sm = handler.getSessionManager();
+    if (sm instanceof AbstractSessionManager) {
+      AbstractSessionManager asm = (AbstractSessionManager) sm;
+      asm.setHttpOnly(true);
+      asm.setSecureCookies(true);
+    }
+    staticContext.setSessionHandler(handler);
     setContextAttributes(staticContext, conf);
     defaultContexts.put(staticContext, true);
   }

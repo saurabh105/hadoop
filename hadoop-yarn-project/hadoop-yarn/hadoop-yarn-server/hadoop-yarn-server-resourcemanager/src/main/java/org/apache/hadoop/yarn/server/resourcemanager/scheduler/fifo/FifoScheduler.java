@@ -43,12 +43,14 @@ import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
+import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueState;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceOption;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
@@ -67,6 +69,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
+import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeResourceUpdateEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.UpdatedContainerInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ActiveUsersManager;
@@ -74,10 +77,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.NodeType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Queue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedContainerChangeRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerAppUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplication;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedContainerChangeRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
@@ -86,7 +89,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAttemptA
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAttemptRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.ContainerExpiredSchedulerEvent;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.ContainerRescheduledEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeResourceUpdateSchedulerEvent;
@@ -140,6 +142,7 @@ public class FifoScheduler extends
       QueueInfo queueInfo = recordFactory.newRecordInstance(QueueInfo.class);
       queueInfo.setQueueName(DEFAULT_QUEUE.getQueueName());
       queueInfo.setCapacity(1.0f);
+      Resource clusterResource = getClusterResource();
       if (clusterResource.getMemory() == 0) {
         queueInfo.setCurrentCapacity(0.0f);
       } else {
@@ -216,6 +219,18 @@ public class FifoScheduler extends
     public Priority getDefaultApplicationPriority() {
       // TODO add implementation for FIFO scheduler
       return null;
+    }
+
+    @Override
+    public void incReservedResource(String partition, Resource reservedRes) {
+      // TODO add implementation for FIFO scheduler
+
+    }
+
+    @Override
+    public void decReservedResource(String partition, Resource reservedRes) {
+      // TODO add implementation for FIFO scheduler
+
     }
   };
 
@@ -295,7 +310,7 @@ public class FifoScheduler extends
 
   @Override
   public int getNumClusterNodes() {
-    return nodes.size();
+    return nodeTracker.nodeCount();
   }
 
   @Override
@@ -325,7 +340,8 @@ public class FifoScheduler extends
 
     // Sanity check
     SchedulerUtils.normalizeRequests(ask, resourceCalculator, 
-        clusterResource, minimumAllocation, getMaximumResourceCapability());
+        getClusterResource(), minimumAllocation,
+        getMaximumResourceCapability());
 
     // Release containers
     releaseContainers(release, application);
@@ -359,7 +375,7 @@ public class FifoScheduler extends
             " #ask=" + ask.size());
       }
 
-      if (application.isWaitingForAMContainer(application.getApplicationId())) {
+      if (application.isWaitingForAMContainer()) {
         // Allocate is for AM and update AM blacklist for this
         application.updateAMBlacklist(
             blacklistAdditions, blacklistRemovals);
@@ -375,7 +391,7 @@ public class FifoScheduler extends
   }
 
   private FiCaSchedulerNode getNode(NodeId nodeId) {
-    return nodes.get(nodeId);
+    return nodeTracker.getNode(nodeId);
   }
 
   @VisibleForTesting
@@ -468,7 +484,7 @@ public class FifoScheduler extends
         LOG.info("Skip killing " + container.getContainerId());
         continue;
       }
-      completedContainer(container,
+      super.completedContainer(container,
         SchedulerUtils.createAbnormalContainerStatus(
           container.getContainerId(), SchedulerUtils.COMPLETED_APPLICATION),
         RMContainerEventType.KILL);
@@ -524,8 +540,8 @@ public class FifoScheduler extends
       application.showRequests();
 
       // Done
-      if (Resources.lessThan(resourceCalculator, clusterResource,
-              node.getAvailableResource(), minimumAllocation)) {
+      if (Resources.lessThan(resourceCalculator, getClusterResource(),
+              node.getUnallocatedResource(), minimumAllocation)) {
         break;
       }
     }
@@ -680,13 +696,9 @@ public class FifoScheduler extends
         " request=" + request + " type=" + type);
     Resource capability = request.getCapability();
 
-    int availableContainers = 
-      node.getAvailableResource().getMemory() / capability.getMemory(); // TODO: A buggy
-                                                                        // application
-                                                                        // with this
-                                                                        // zero would
-                                                                        // crash the
-                                                                        // scheduler.
+    // TODO: A buggy application with this zero would crash the scheduler.
+    int availableContainers = node.getUnallocatedResource().getMemory() /
+        capability.getMemory();
     int assignedContainers = 
       Math.min(assignableContainers, availableContainers);
 
@@ -739,25 +751,42 @@ public class FifoScheduler extends
     for (ContainerStatus completedContainer : completedContainers) {
       ContainerId containerId = completedContainer.getContainerId();
       LOG.debug("Container FINISHED: " + containerId);
-      completedContainer(getRMContainer(containerId), 
+      super.completedContainer(getRMContainer(containerId),
           completedContainer, RMContainerEventType.FINISHED);
     }
 
+    // Updating node resource utilization
+    node.setAggregatedContainersUtilization(
+        rmNode.getAggregatedContainersUtilization());
+    node.setNodeUtilization(rmNode.getNodeUtilization());
+
+    // If the node is decommissioning, send an update to have the total
+    // resource equal to the used resource, so no available resource to
+    // schedule.
+    if (rmNode.getState() == NodeState.DECOMMISSIONING) {
+      this.rmContext
+          .getDispatcher()
+          .getEventHandler()
+          .handle(
+              new RMNodeResourceUpdateEvent(rmNode.getNodeID(), ResourceOption
+                  .newInstance(getSchedulerNode(rmNode.getNodeID())
+                      .getAllocatedResource(), 0)));
+    }
 
     if (rmContext.isWorkPreservingRecoveryEnabled()
         && !rmContext.isSchedulerReadyForAllocatingContainers()) {
       return;
     }
 
-    if (Resources.greaterThanOrEqual(resourceCalculator, clusterResource,
-            node.getAvailableResource(),minimumAllocation)) {
+    if (Resources.greaterThanOrEqual(resourceCalculator, getClusterResource(),
+            node.getUnallocatedResource(), minimumAllocation)) {
       LOG.debug("Node heartbeat " + rmNode.getNodeID() + 
-          " available resource = " + node.getAvailableResource());
+          " available resource = " + node.getUnallocatedResource());
 
       assignContainers(node);
 
       LOG.debug("Node after allocation " + rmNode.getNodeID() + " resource = "
-          + node.getAvailableResource());
+          + node.getUnallocatedResource());
     }
 
     updateAvailableResourcesMetrics();
@@ -768,13 +797,13 @@ public class FifoScheduler extends
   }
 
   private void updateAppHeadRoom(SchedulerApplicationAttempt schedulerAttempt) {
-    schedulerAttempt.setHeadroom(Resources.subtract(clusterResource,
+    schedulerAttempt.setHeadroom(Resources.subtract(getClusterResource(),
       usedResource));
   }
 
   private void updateAvailableResourcesMetrics() {
-    metrics.setAvailableResourcesToQueue(Resources.subtract(clusterResource,
-      usedResource));
+    metrics.setAvailableResourcesToQueue(
+        Resources.subtract(getClusterResource(), usedResource));
   }
 
   @Override
@@ -854,19 +883,11 @@ public class FifoScheduler extends
       ContainerExpiredSchedulerEvent containerExpiredEvent = 
           (ContainerExpiredSchedulerEvent) event;
       ContainerId containerid = containerExpiredEvent.getContainerId();
-      completedContainer(getRMContainer(containerid), 
+      super.completedContainer(getRMContainer(containerid),
           SchedulerUtils.createAbnormalContainerStatus(
               containerid, 
               SchedulerUtils.EXPIRED_CONTAINER),
           RMContainerEventType.EXPIRE);
-    }
-    break;
-    case CONTAINER_RESCHEDULED:
-    {
-      ContainerRescheduledEvent containerRescheduledEvent =
-          (ContainerRescheduledEvent) event;
-      RMContainer container = containerRescheduledEvent.getContainer();
-      recoverResourceRequestForContainer(container);
     }
     break;
     default:
@@ -876,12 +897,9 @@ public class FifoScheduler extends
 
   @Lock(FifoScheduler.class)
   @Override
-  protected synchronized void completedContainer(RMContainer rmContainer,
-      ContainerStatus containerStatus, RMContainerEventType event) {
-    if (rmContainer == null) {
-      LOG.info("Null container completed...");
-      return;
-    }
+  protected synchronized void completedContainerInternal(
+      RMContainer rmContainer, ContainerStatus containerStatus,
+      RMContainerEventType event) {
 
     // Get the application for the finished container
     Container container = rmContainer.getContainer();
@@ -921,25 +939,19 @@ public class FifoScheduler extends
   private Resource usedResource = recordFactory.newRecordInstance(Resource.class);
 
   private synchronized void removeNode(RMNode nodeInfo) {
-    FiCaSchedulerNode node = getNode(nodeInfo.getNodeID());
+    FiCaSchedulerNode node = nodeTracker.getNode(nodeInfo.getNodeID());
     if (node == null) {
       return;
     }
     // Kill running containers
     for(RMContainer container : node.getRunningContainers()) {
-      completedContainer(container, 
+      super.completedContainer(container,
           SchedulerUtils.createAbnormalContainerStatus(
               container.getContainerId(), 
               SchedulerUtils.LOST_CONTAINER),
               RMContainerEventType.KILL);
     }
-    
-    //Remove the node
-    this.nodes.remove(nodeInfo.getNodeID());
-    updateMaximumAllocation(node, false);
-    
-    // Update cluster metrics
-    Resources.subtractFrom(clusterResource, node.getRMNode().getTotalCapability());
+    nodeTracker.removeNode(nodeInfo.getNodeID());
   }
 
   @Override
@@ -961,9 +973,7 @@ public class FifoScheduler extends
   private synchronized void addNode(RMNode nodeManager) {
     FiCaSchedulerNode schedulerNode = new FiCaSchedulerNode(nodeManager,
         usePortForNodeName);
-    this.nodes.put(nodeManager.getNodeID(), schedulerNode);
-    Resources.addTo(clusterResource, nodeManager.getTotalCapability());
-    updateMaximumAllocation(schedulerNode, true);
+    nodeTracker.addNode(schedulerNode);
   }
 
   @Override

@@ -31,7 +31,9 @@ import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.Timeout;
 
 public class TestDFSStripedOutputStream {
   public static final Log LOG = LogFactory.getLog(
@@ -52,6 +54,9 @@ public class TestDFSStripedOutputStream {
   private final int stripesPerBlock = 4;
   private final int blockSize = cellSize * stripesPerBlock;
 
+  @Rule
+  public Timeout globalTimeout = new Timeout(300000);
+
   @Before
   public void setup() throws IOException {
     int numDNs = dataBlocks + parityBlocks + 2;
@@ -69,6 +74,7 @@ public class TestDFSStripedOutputStream {
   public void tearDown() {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 

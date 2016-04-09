@@ -21,6 +21,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -154,12 +155,16 @@ final class FSDirErasureCodingOp {
    * @param src path
    * @return {@link ErasureCodingPolicy}
    * @throws IOException
+   * @throws FileNotFoundException if the path does not exist.
    */
   static ErasureCodingPolicy getErasureCodingPolicy(final FSNamesystem fsn,
       final String src) throws IOException {
     assert fsn.hasReadLock();
 
     final INodesInPath iip = getINodesInPath(fsn, src);
+    if (iip.getLastINode() == null) {
+      throw new FileNotFoundException("Path not found: " + iip.getPath());
+    }
     return getErasureCodingPolicyForPath(fsn, iip);
   }
 
@@ -213,7 +218,6 @@ final class FSDirErasureCodingOp {
   static ErasureCodingPolicy[] getErasureCodingPolicies(final FSNamesystem fsn)
       throws IOException {
     assert fsn.hasReadLock();
-
     return fsn.getErasureCodingPolicyManager().getPolicies();
   }
 
@@ -244,12 +248,10 @@ final class FSDirErasureCodingOp {
         if (inode == null) {
           continue;
         }
-        /**
-         * TODO: lookup {@link ErasureCodingPolicyManager#getSystemPolices()}
-         */
         if (inode.isFile()) {
-          return inode.asFile().getErasureCodingPolicyID() == 0 ?
-              null : ErasureCodingPolicyManager.getSystemDefaultPolicy();
+          byte id = inode.asFile().getErasureCodingPolicyID();
+          return id < 0 ? null : fsd.getFSNamesystem().
+              getErasureCodingPolicyManager().getPolicyByID(id);
         }
         // We don't allow setting EC policies on paths with a symlink. Thus
         // if a symlink is encountered, the dir shouldn't have EC policy.
@@ -265,7 +267,7 @@ final class FSDirErasureCodingOp {
             DataInputStream dIn = new DataInputStream(bIn);
             String ecPolicyName = WritableUtils.readString(dIn);
             return fsd.getFSNamesystem().getErasureCodingPolicyManager().
-                getPolicy(ecPolicyName);
+                getPolicyByName(ecPolicyName);
           }
         }
       }

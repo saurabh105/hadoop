@@ -28,6 +28,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -58,6 +59,7 @@ import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
@@ -73,23 +75,27 @@ import org.apache.hadoop.yarn.server.resourcemanager.amlauncher.AMLauncherEventT
 import org.apache.hadoop.yarn.server.resourcemanager.blacklist.BlacklistManager;
 import org.apache.hadoop.yarn.server.resourcemanager.blacklist.BlacklistUpdates;
 import org.apache.hadoop.yarn.server.resourcemanager.blacklist.DisabledBlacklistManager;
-import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationAttemptStateData;
-import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.Recoverable;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationAttemptStateData;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppFailedAttemptEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptContainerFinishedEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptRegistrationEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptStatusupdateEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptUnregistrationEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeFinishedContainersPulledByAMEvent;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt.AMState;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAttemptAddedSchedulerEvent;
@@ -185,6 +191,8 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   private RMAppAttemptMetrics attemptMetrics = null;
   private ResourceRequest amReq = null;
   private BlacklistManager blacklistedNodesForAM = null;
+
+  private String amLaunchDiagnostics;
 
   private static final StateMachineFactory<RMAppAttemptImpl,
                                            RMAppAttemptState,
@@ -624,6 +632,21 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     }
   }
 
+  private void setTrackingUrlToAHSPage(RMAppAttemptState stateToBeStored) {
+    originalTrackingUrl = pjoin(
+        WebAppUtils.getHttpSchemePrefix(conf) +
+        WebAppUtils.getAHSWebAppURLWithoutScheme(conf),
+        "applicationhistory", "app", getAppAttemptId().getApplicationId());
+    switch (stateToBeStored) {
+    case KILLED:
+    case FAILED:
+      proxiedTrackingUrl = originalTrackingUrl;
+      break;
+    default:
+      break;
+    }
+  }
+
   private void invalidateAMHostAndPort() {
     this.host = "N/A";
     this.rpcPort = -1;
@@ -702,8 +725,10 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
   @Override
   public String getDiagnostics() {
     this.readLock.lock();
-
     try {
+      if (diagnostics.length() == 0 && amLaunchDiagnostics != null) {
+        return amLaunchDiagnostics;
+      }
       return this.diagnostics.toString();
     } finally {
       this.readLock.unlock();
@@ -902,6 +927,20 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     this.justFinishedContainers = attempt.getJustFinishedContainersReference();
     this.finishedContainersSentToAM =
         attempt.getFinishedContainersSentToAMReference();
+    // container complete msg was moved from justFinishedContainers to
+    // finishedContainersSentToAM in ApplicationMasterService#allocate,
+    // if am crashed and not received this response, we should resend
+    // this msg again after am restart
+    if (!this.finishedContainersSentToAM.isEmpty()) {
+      for (NodeId nodeId : this.finishedContainersSentToAM.keySet()) {
+        List<ContainerStatus> containerStatuses =
+            this.finishedContainersSentToAM.get(nodeId);
+        this.justFinishedContainers.putIfAbsent(nodeId,
+            new ArrayList<ContainerStatus>());
+        this.justFinishedContainers.get(nodeId).addAll(containerStatuses);
+      }
+      this.finishedContainersSentToAM.clear();
+    }
   }
 
   private void recoverAppAttemptCredentials(Credentials appAttemptTokens,
@@ -1102,6 +1141,9 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     @Override
     public RMAppAttemptState transition(RMAppAttemptImpl appAttempt,
         RMAppAttemptEvent event) {
+      RMApp rmApp = appAttempt.rmContext.getRMApps().get(
+          appAttempt.getAppAttemptId().getApplicationId());
+
       /*
        * If last attempt recovered final state is null .. it means attempt was
        * started but AM container may or may not have started / finished.
@@ -1109,8 +1151,6 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
        */
       if (appAttempt.recoveredFinalState != null) {
         appAttempt.progress = 1.0f;
-        RMApp rmApp =appAttempt.rmContext.getRMApps().get(
-            appAttempt.getAppAttemptId().getApplicationId());
 
         if (appAttempt.submissionContext
             .getKeepContainersAcrossApplicationAttempts()
@@ -1130,7 +1170,24 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
               appAttempt, event);
         }
         return appAttempt.recoveredFinalState;
-      } else {
+      } else if (RMAppImpl.isAppInFinalState(rmApp))  {
+        // Somehow attempt final state was not saved but app final state was saved.
+        // Skip adding the attempt into scheduler
+        RMAppState appState = ((RMAppImpl) rmApp).getRecoveredFinalState();
+        LOG.warn(rmApp.getApplicationId() + " final state (" + appState
+            + ") was recorded, but " + appAttempt.applicationAttemptId
+            + " final state (" + appAttempt.recoveredFinalState
+            + ") was not recorded.");
+        switch (appState) {
+        case FINISHED:
+          return RMAppAttemptState.FINISHED;
+        case FAILED:
+          return RMAppAttemptState.FAILED;
+        case KILLED:
+          return RMAppAttemptState.KILLED;
+        }
+        return RMAppAttemptState.FAILED;
+      } else{
         // Add the current attempt to the scheduler.
         if (appAttempt.rmContext.isWorkPreservingRecoveryEnabled()) {
           // Need to register an app attempt before AM can register
@@ -1164,6 +1221,7 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     }
   }
 
+
   private void rememberTargetTransitions(RMAppAttemptEvent event,
       Object transitionToDo, RMAppAttemptState targetFinalState) {
     transitionTodo = transitionToDo;
@@ -1186,7 +1244,12 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     String diags = null;
 
     // don't leave the tracking URL pointing to a non-existent AM
-    setTrackingUrlToRMAppPage(stateToBeStored);
+    if (conf.getBoolean(YarnConfiguration.APPLICATION_HISTORY_ENABLED,
+            YarnConfiguration.DEFAULT_APPLICATION_HISTORY_ENABLED)) {
+      setTrackingUrlToAHSPage(stateToBeStored);
+    } else {
+      setTrackingUrlToRMAppPage(stateToBeStored);
+    }
     String finalTrackingUrl = getOriginalTrackingUrl();
     FinalApplicationStatus finalStatus = null;
     int exitStatus = ContainerExitStatus.INVALID;
@@ -1389,6 +1452,9 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
             appAttempt.launchAMStartTime;
         ClusterMetrics.getMetrics().addAMLaunchDelay(delay);
       }
+
+      appAttempt
+          .updateAMLaunchDiagnostics(AMState.LAUNCHED.getDiagnosticMessage());
       // Register with AMLivelinessMonitor
       appAttempt.attemptLaunched();
 
@@ -1486,6 +1552,9 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       appAttempt.rpcPort = registrationEvent.getRpcport();
       appAttempt.originalTrackingUrl =
           sanitizeTrackingUrl(registrationEvent.getTrackingurl());
+
+      // reset AMLaunchDiagnostics once AM Registers with RM
+      appAttempt.updateAMLaunchDiagnostics(null);
 
       // Let the app know
       appAttempt.eventHandler.handle(new RMAppEvent(appAttempt
@@ -1790,13 +1859,13 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     } else {
       LOG.warn("No ContainerStatus in containerFinishedEvent");
     }
-    finishedContainersSentToAM.putIfAbsent(nodeId,
-      new ArrayList<ContainerStatus>());
-    appAttempt.finishedContainersSentToAM.get(nodeId).add(
-      containerFinishedEvent.getContainerStatus());
 
     if (!appAttempt.getSubmissionContext()
-      .getKeepContainersAcrossApplicationAttempts()) {
+        .getKeepContainersAcrossApplicationAttempts()) {
+      finishedContainersSentToAM.putIfAbsent(nodeId,
+          new ArrayList<ContainerStatus>());
+      appAttempt.finishedContainersSentToAM.get(nodeId).add(
+          containerFinishedEvent.getContainerStatus());
       appAttempt.sendFinishedContainersToNM();
     } else {
       appAttempt.sendFinishedAMContainerToNM(nodeId,
@@ -2036,11 +2105,11 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
       // am container.
       ContainerId amId =
           masterContainer == null ? null : masterContainer.getId();
-      attemptReport = ApplicationAttemptReport.newInstance(this
-          .getAppAttemptId(), this.getHost(), this.getRpcPort(), this
-          .getTrackingUrl(), this.getOriginalTrackingUrl(), this.getDiagnostics(),
-              YarnApplicationAttemptState.valueOf(this.getState().toString()),
-              amId, this.startTime, this.finishTime);
+      attemptReport = ApplicationAttemptReport.newInstance(
+          this.getAppAttemptId(), this.getHost(), this.getRpcPort(),
+          this.getTrackingUrl(), this.getOriginalTrackingUrl(),
+          this.getDiagnostics(), createApplicationAttemptState(), amId,
+          this.startTime, this.finishTime);
     } finally {
       this.readLock.unlock();
     }
@@ -2076,5 +2145,32 @@ public class RMAppAttemptImpl implements RMAppAttempt, Recoverable {
     } finally {
       this.writeLock.unlock();
     }
+  }
+
+  @Override
+  public void updateAMLaunchDiagnostics(String amLaunchDiagnostics) {
+    this.amLaunchDiagnostics = amLaunchDiagnostics;
+  }
+
+  public RMAppAttemptState getRecoveredFinalState() {
+    return recoveredFinalState;
+  }
+
+  public void setRecoveredFinalState(RMAppAttemptState finalState) {
+    this.recoveredFinalState = finalState;
+  }
+
+  @Override
+  public Set<String> getBlacklistedNodes() {
+    if (scheduler instanceof AbstractYarnScheduler) {
+      AbstractYarnScheduler ayScheduler =
+          (AbstractYarnScheduler) scheduler;
+      SchedulerApplicationAttempt attempt =
+          ayScheduler.getApplicationAttempt(applicationAttemptId);
+      if (attempt != null) {
+        return attempt.getBlacklistedNodes();
+      }
+    }
+    return Collections.EMPTY_SET;
   }
 }

@@ -22,12 +22,13 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import static org.apache.hadoop.fs.FileSystemTestHelper.*;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.*;
 import static org.junit.Assert.*;
 
 public class TestChecksumFileSystem {
-  static final String TEST_ROOT_DIR
-    = System.getProperty("test.build.data","build/test/data/work-dir/localfs");
+  static final String TEST_ROOT_DIR =
+      GenericTestUtils.getTempPath("work-dir/localfs");
 
   static LocalFileSystem localFs;
 
@@ -227,6 +228,29 @@ public class TestChecksumFileSystem {
     verifyRename(srcPath, dstPath, false);
   }
 
+
+  @Test
+  public void testSetConf() {
+    Configuration conf = new Configuration();
+
+    conf.setInt(LocalFileSystemConfigKeys.LOCAL_FS_BYTES_PER_CHECKSUM_KEY, 0);
+    try {
+      localFs.setConf(conf);
+      fail("Should have failed because zero bytes per checksum is invalid");
+    } catch (IllegalStateException ignored) {
+    }
+
+    conf.setInt(LocalFileSystemConfigKeys.LOCAL_FS_BYTES_PER_CHECKSUM_KEY, -1);
+    try {
+      localFs.setConf(conf);
+      fail("Should have failed because negative bytes per checksum is invalid");
+    } catch (IllegalStateException ignored) {
+    }
+
+    conf.setInt(LocalFileSystemConfigKeys.LOCAL_FS_BYTES_PER_CHECKSUM_KEY, 512);
+    localFs.setConf(conf);
+
+  }
 
   void verifyRename(Path srcPath, Path dstPath, boolean dstIsDir)
       throws Exception { 

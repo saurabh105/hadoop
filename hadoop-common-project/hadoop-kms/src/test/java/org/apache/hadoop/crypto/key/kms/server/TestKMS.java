@@ -29,6 +29,7 @@ import org.apache.hadoop.crypto.key.KeyProviderCryptoExtension.EncryptedKeyVersi
 import org.apache.hadoop.crypto.key.KeyProviderDelegationTokenExtension;
 import org.apache.hadoop.crypto.key.kms.KMSClientProvider;
 import org.apache.hadoop.crypto.key.kms.LoadBalancingKMSClientProvider;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.minikdc.MiniKdc;
@@ -38,16 +39,18 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AuthorizationException;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.log4j.Level;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.login.AppConfigurationEntry;
-import javax.security.auth.login.LoginContext;
 
 import java.io.File;
 import java.io.FileWriter;
@@ -59,26 +62,25 @@ import java.net.ServerSocket;
 import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URL;
-import java.security.Principal;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 
 public class TestKMS {
+  private static final Logger LOG = LoggerFactory.getLogger(TestKMS.class);
 
   @Before
   public void cleanUp() {
     // resetting kerberos security
     Configuration conf = new Configuration();
     UserGroupInformation.setConfiguration(conf);
+    GenericTestUtils.setLogLevel(LOG, Level.INFO);
   }
 
   public static File getTestDir() throws Exception {
@@ -250,22 +252,12 @@ public class TestKMS {
 
   private <T> T doAs(String user, final PrivilegedExceptionAction<T> action)
       throws Exception {
-    Set<Principal> principals = new HashSet<Principal>();
-    principals.add(new KerberosPrincipal(user));
-
-    //client login
-    Subject subject = new Subject(false, principals,
-        new HashSet<Object>(), new HashSet<Object>());
-    LoginContext loginContext = new LoginContext("", subject, null,
-        KerberosConfiguration.createClientConfig(user, keytab));
+    UserGroupInformation.loginUserFromKeytab(user, keytab.getAbsolutePath());
+    UserGroupInformation ugi = UserGroupInformation.getLoginUser();
     try {
-      loginContext.login();
-      subject = loginContext.getSubject();
-      UserGroupInformation ugi =
-          UserGroupInformation.getUGIFromSubject(subject);
       return ugi.doAs(action);
     } finally {
-      loginContext.logout();
+      ugi.logoutUserFromKeytab();
     }
   }
 
@@ -392,6 +384,42 @@ public class TestKMS {
   @Test
   public void testStartStopHttpsKerberos() throws Exception {
     testStartStop(true, true);
+  }
+
+  @Test(timeout = 30000)
+  public void testSpecialKeyNames() throws Exception {
+    final String specialKey = "key %^[\n{]}|\"<>\\";
+    Configuration conf = new Configuration();
+    conf.set("hadoop.security.authentication", "kerberos");
+    UserGroupInformation.setConfiguration(conf);
+    File confDir = getTestDir();
+    conf = createBaseKMSConf(confDir);
+    conf.set(KeyAuthorizationKeyProvider.KEY_ACL + specialKey + ".ALL", "*");
+    writeConf(confDir, conf);
+
+    runServer(null, null, confDir, new KMSCallable<Void>() {
+      @Override
+      public Void call() throws Exception {
+        Configuration conf = new Configuration();
+        URI uri = createKMSUri(getKMSUrl());
+        KeyProvider kp = createProvider(uri, conf);
+        Assert.assertTrue(kp.getKeys().isEmpty());
+        Assert.assertEquals(0, kp.getKeysMetadata().length);
+
+        KeyProvider.Options options = new KeyProvider.Options(conf);
+        options.setCipher("AES/CTR/NoPadding");
+        options.setBitLength(128);
+        options.setDescription("l1");
+        LOG.info("Creating key with name '{}'", specialKey);
+
+        KeyProvider.KeyVersion kv0 = kp.createKey(specialKey, options);
+        Assert.assertNotNull(kv0);
+        Assert.assertEquals(specialKey, kv0.getName());
+        Assert.assertNotNull(kv0.getVersionName());
+        Assert.assertNotNull(kv0.getMaterial());
+        return null;
+      }
+    });
   }
 
   @Test
@@ -645,10 +673,24 @@ public class TestKMS {
 
         EncryptedKeyVersion ekv1 = kpce.generateEncryptedKey("k6");
         kpce.rollNewVersion("k6");
-        EncryptedKeyVersion ekv2 = kpce.generateEncryptedKey("k6");
-        Assert.assertNotEquals(ekv1.getEncryptionKeyVersionName(),
-            ekv2.getEncryptionKeyVersionName());
 
+        /**
+         * due to the cache on the server side, client may get old keys.
+         * @see EagerKeyGeneratorKeyProviderCryptoExtension#rollNewVersion(String)
+         */
+        boolean rollSucceeded = false;
+        for (int i = 0; i <= EagerKeyGeneratorKeyProviderCryptoExtension
+            .KMS_KEY_CACHE_SIZE_DEFAULT + CommonConfigurationKeysPublic.
+            KMS_CLIENT_ENC_KEY_CACHE_SIZE_DEFAULT; ++i) {
+          EncryptedKeyVersion ekv2 = kpce.generateEncryptedKey("k6");
+          if (!(ekv1.getEncryptionKeyVersionName()
+              .equals(ekv2.getEncryptionKeyVersionName()))) {
+            rollSucceeded = true;
+            break;
+          }
+        }
+        Assert.assertTrue("rollover did not generate a new key even after"
+            + " queue is drained", rollSucceeded);
         return null;
       }
     });

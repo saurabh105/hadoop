@@ -14,6 +14,8 @@
 
 # Unix Shell Guide
 
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
+
 Much of Hadoop's functionality is controlled via [the shell](CommandsManual.html).  There are several ways to modify the default behavior of how these commands execute.
 
 ## Important End-User Environment Variables
@@ -81,7 +83,7 @@ Apache Hadoop allows for third parties to easily add new features through a vari
 
 Core to this functionality is the concept of a shell profile.  Shell profiles are shell snippets that can do things such as add jars to the classpath, configure Java system properties and more.
 
-Shell profiles may be installed in either `${HADOOP_CONF_DIR}/shellprofile.d` or `${HADOOP_PREFIX}/libexec/shellprofile.d`.  Shell profiles in the `libexec` directory are part of the base installation and cannot be overriden by the user.  Shell profiles in the configuration directory may be ignored if the end user changes the configuration directory at runtime.
+Shell profiles may be installed in either `${HADOOP_CONF_DIR}/shellprofile.d` or `${HADOOP_HOME}/libexec/shellprofile.d`.  Shell profiles in the `libexec` directory are part of the base installation and cannot be overriden by the user.  Shell profiles in the configuration directory may be ignored if the end user changes the configuration directory at runtime.
 
 An example of a shell profile is in the libexec directory.
 

@@ -124,7 +124,10 @@ public class TestNameNodeMetrics {
       MetricsRecordBuilder rb = getMetrics(source);
       assertQuantileGauges("GetGroups1s", rb);
     }
-    cluster.shutdown();
+    if (cluster != null) {
+      cluster.shutdown();
+      cluster = null;
+    }
   }
   
   /** create a file with a length of <code>fileLen</code> */
@@ -286,7 +289,7 @@ public class TestNameNodeMetrics {
     fs.delete(file, true);
     rb = getMetrics(NS_METRICS);
     assertGauge("ExcessBlocks", 0L, rb);
-    assertTrue(bm.excessReplicateMap.isEmpty());
+    assertEquals(0L, bm.getExcessBlocksCount());
   }
   
   /** Test to ensure metrics reflects missing blocks */

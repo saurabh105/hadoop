@@ -69,11 +69,11 @@ import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshAdminAclsRespons
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshClusterMaxPriorityRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshClusterMaxPriorityResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshNodesRequest;
+import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshNodesResourcesRequest;
+import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshNodesResourcesResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshNodesResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshQueuesRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshQueuesResponse;
-import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshNodesResourcesRequest;
-import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshNodesResourcesResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshServiceAclsRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshServiceAclsResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RefreshSuperUserGroupsConfigurationRequest;
@@ -106,6 +106,7 @@ public class AdminService extends CompositeService implements
   private String rmId;
 
   private boolean autoFailoverEnabled;
+  private boolean curatorEnabled;
   private EmbeddedElectorService embeddedElector;
 
   private Server server;
@@ -132,13 +133,16 @@ public class AdminService extends CompositeService implements
   @Override
   public void serviceInit(Configuration conf) throws Exception {
     if (rmContext.isHAEnabled()) {
+      curatorEnabled = conf.getBoolean(YarnConfiguration.CURATOR_LEADER_ELECTOR,
+          YarnConfiguration.DEFAULT_CURATOR_LEADER_ELECTOR_ENABLED);
       autoFailoverEnabled = HAUtil.isAutomaticFailoverEnabled(conf);
-      if (autoFailoverEnabled) {
+      if (autoFailoverEnabled && !curatorEnabled) {
         if (HAUtil.isAutomaticFailoverEmbedded(conf)) {
           embeddedElector = createEmbeddedElectorService();
           addIfService(embeddedElector);
         }
       }
+
     }
 
     masterServiceBindAddress = conf.getSocketAddr(
@@ -319,7 +323,7 @@ public class AdminService extends CompositeService implements
       rm.transitionToActive();
     } catch (Exception e) {
       RMAuditLogger.logFailure(user.getShortUserName(), "transitionToActive",
-          "", "RMHAProtocolService",
+          "", "RM",
           "Exception transitioning to active");
       throw new ServiceFailedException(
           "Error when transitioning to Active mode", e);
@@ -338,7 +342,7 @@ public class AdminService extends CompositeService implements
           "Error on refreshAll during transistion to Active", e);
     }
     RMAuditLogger.logSuccess(user.getShortUserName(), "transitionToActive",
-        "RMHAProtocolService");
+        "RM");
   }
 
   @Override
@@ -356,10 +360,10 @@ public class AdminService extends CompositeService implements
     try {
       rm.transitionToStandby(true);
       RMAuditLogger.logSuccess(user.getShortUserName(),
-          "transitionToStandby", "RMHAProtocolService");
+          "transitionToStandby", "RM");
     } catch (Exception e) {
       RMAuditLogger.logFailure(user.getShortUserName(), "transitionToStandby",
-          "", "RMHAProtocolService",
+          "", "RM",
           "Exception transitioning to standby");
       throw new ServiceFailedException(
           "Error when transitioning to Standby mode", e);
@@ -369,15 +373,28 @@ public class AdminService extends CompositeService implements
   @Override
   public synchronized HAServiceStatus getServiceStatus() throws IOException {
     checkAccess("getServiceState");
-    HAServiceState haState = rmContext.getHAServiceState();
-    HAServiceStatus ret = new HAServiceStatus(haState);
-    if (isRMActive() || haState == HAServiceProtocol.HAServiceState.STANDBY) {
-      ret.setReadyToBecomeActive();
+    if (curatorEnabled) {
+      HAServiceStatus state;
+      if (rmContext.getLeaderElectorService().hasLeaderShip()) {
+        state = new HAServiceStatus(HAServiceState.ACTIVE);
+      } else {
+        state = new HAServiceStatus(HAServiceState.STANDBY);
+      }
+      // set empty string to avoid NPE at
+      // HAServiceProtocolServerSideTranslatorPB#getServiceStatus
+      state.setNotReadyToBecomeActive("");
+      return state;
     } else {
-      ret.setNotReadyToBecomeActive("State is " + haState);
+      HAServiceState haState = rmContext.getHAServiceState();
+      HAServiceStatus ret = new HAServiceStatus(haState);
+      if (isRMActive() || haState == HAServiceProtocol.HAServiceState.STANDBY) {
+        ret.setReadyToBecomeActive();
+      } else {
+        ret.setNotReadyToBecomeActive("State is " + haState);
+      }
+      return ret;
     }
-    return ret;
-  } 
+  }
 
   @Override
   public RefreshQueuesResponse refreshQueues(RefreshQueuesRequest request)
@@ -622,34 +639,32 @@ public class AdminService extends CompositeService implements
     try {
       Configuration conf = getConfig();
       Configuration configuration = new Configuration(conf);
-      DynamicResourceConfiguration newconf;
+      DynamicResourceConfiguration newConf;
 
-      InputStream DRInputStream =
-        this.rmContext.getConfigurationProvider()
-        .getConfigurationInputStream(configuration,
-          YarnConfiguration.DR_CONFIGURATION_FILE);
-      if (DRInputStream != null) {
-        configuration.addResource(DRInputStream);
-        newconf = new DynamicResourceConfiguration(configuration, false);
+      InputStream drInputStream =
+          this.rmContext.getConfigurationProvider().getConfigurationInputStream(
+              configuration, YarnConfiguration.DR_CONFIGURATION_FILE);
+
+      if (drInputStream != null) {
+        newConf = new DynamicResourceConfiguration(configuration,
+            drInputStream);
       } else {
-        newconf = new DynamicResourceConfiguration(configuration, true);
+        newConf = new DynamicResourceConfiguration(configuration);
       }
 
-      if (newconf.getNodes().length == 0) {
-        RMAuditLogger.logSuccess(user.getShortUserName(), argName,
-            "AdminService");
-        return response;
-      } else {
+      if (newConf.getNodes() != null && newConf.getNodes().length != 0) {
         Map<NodeId, ResourceOption> nodeResourceMap =
-          newconf.getNodeResourceMap();
-
+            newConf.getNodeResourceMap();
         UpdateNodeResourceRequest updateRequest =
-          UpdateNodeResourceRequest.newInstance(nodeResourceMap);
+            UpdateNodeResourceRequest.newInstance(nodeResourceMap);
         updateNodeResource(updateRequest);
-        RMAuditLogger.logSuccess(user.getShortUserName(), argName,
-          "AdminService");
-        return response;
       }
+      // refresh dynamic resource in ResourceTrackerService
+      this.rmContext.getResourceTrackerService().
+          updateDynamicResourceConfiguration(newConf);
+      RMAuditLogger.logSuccess(user.getShortUserName(), argName,
+              "AdminService");
+      return response;
     } catch (IOException ioe) {
       throw logAndWrapException(ioe, user.getShortUserName(), argName, msg);
     }
@@ -837,6 +852,12 @@ public class AdminService extends CompositeService implements
     } else if (!autoFailoverEnabled) {
       return "Auto Failover is not enabled.";
     }
-    return this.embeddedElector.getHAZookeeperConnectionState();
+    if (curatorEnabled) {
+      return "Connected to zookeeper : " + rmContext
+          .getLeaderElectorService().getCuratorClient().getZookeeperClient()
+          .isConnected();
+    } else {
+      return this.embeddedElector.getHAZookeeperConnectionState();
+    }
   }
 }

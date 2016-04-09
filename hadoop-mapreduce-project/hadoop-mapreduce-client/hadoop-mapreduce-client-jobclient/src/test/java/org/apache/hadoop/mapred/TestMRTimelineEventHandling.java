@@ -27,6 +27,7 @@ import org.apache.hadoop.mapreduce.v2.MiniMRYarnCluster;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntities;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.server.MiniYARNCluster;
 import org.apache.hadoop.yarn.server.timeline.TimelineStore;
 
 import org.junit.Assert;
@@ -91,11 +92,15 @@ public class TestMRTimelineEventHandling {
           TestJobHistoryEventHandler.class.getSimpleName(), 1);
       cluster.init(conf);
       cluster.start();
+      conf.set(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
+          MiniYARNCluster.getHostname() + ":"
+          + cluster.getApplicationHistoryServer().getPort());
       TimelineStore ts = cluster.getApplicationHistoryServer()
               .getTimelineStore();
-
-      Path inDir = new Path("input");
-      Path outDir = new Path("output");
+      String localPathRoot = System.getProperty("test.build.data",
+          "build/test/data");
+      Path inDir = new Path(localPathRoot, "input");
+      Path outDir = new Path(localPathRoot, "output");
       RunningJob job =
               UtilsForTests.runJobSucceed(new JobConf(conf), inDir, outDir);
       Assert.assertEquals(JobStatus.SUCCEEDED,
@@ -145,11 +150,16 @@ public class TestMRTimelineEventHandling {
           TestJobHistoryEventHandler.class.getSimpleName(), 1);
       cluster.init(conf);
       cluster.start();
+      conf.set(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
+          MiniYARNCluster.getHostname() + ":"
+          + cluster.getApplicationHistoryServer().getPort());
       TimelineStore ts = cluster.getApplicationHistoryServer()
           .getTimelineStore();
 
-      Path inDir = new Path("input");
-      Path outDir = new Path("output");
+      String localPathRoot = System.getProperty("test.build.data",
+          "build/test/data");
+      Path inDir = new Path(localPathRoot, "input");
+      Path outDir = new Path(localPathRoot, "output");
       RunningJob job =
           UtilsForTests.runJobSucceed(new JobConf(conf), inDir, outDir);
       Assert.assertEquals(JobStatus.SUCCEEDED,
@@ -182,11 +192,16 @@ public class TestMRTimelineEventHandling {
           TestJobHistoryEventHandler.class.getSimpleName(), 1);
       cluster.init(conf);
       cluster.start();
+      conf.set(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
+          MiniYARNCluster.getHostname() + ":"
+          + cluster.getApplicationHistoryServer().getPort());
       TimelineStore ts = cluster.getApplicationHistoryServer()
           .getTimelineStore();
 
-      Path inDir = new Path("input");
-      Path outDir = new Path("output");
+      String localPathRoot = System.getProperty("test.build.data",
+          "build/test/data");
+      Path inDir = new Path(localPathRoot, "input");
+      Path outDir = new Path(localPathRoot, "output");
 
       conf.setBoolean(MRJobConfig.MAPREDUCE_JOB_EMIT_TIMELINE_DATA, false);
       RunningJob job =

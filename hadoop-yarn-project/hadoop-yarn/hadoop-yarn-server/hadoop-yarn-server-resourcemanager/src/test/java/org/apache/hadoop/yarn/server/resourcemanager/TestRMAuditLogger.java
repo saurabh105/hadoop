@@ -24,16 +24,27 @@ import static org.mockito.Mockito.when;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 
+import com.google.protobuf.BlockingService;
+import com.google.protobuf.RpcController;
+import com.google.protobuf.ServiceException;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.ipc.CallerContext;
+import org.apache.hadoop.ipc.ClientId;
+import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.Server;
 import org.apache.hadoop.ipc.TestRPC.TestImpl;
 import org.apache.hadoop.ipc.TestRPC.TestProtocol;
+import org.apache.hadoop.ipc.TestRpcBase;
+import org.apache.hadoop.ipc.TestRpcBase.TestRpcService;
+import org.apache.hadoop.ipc.protobuf.TestProtos;
+import org.apache.hadoop.ipc.protobuf.TestRpcServiceProtos;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.server.resourcemanager.RMAuditLogger.Keys;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -50,6 +61,8 @@ public class TestRMAuditLogger {
   private static final ApplicationId APPID = mock(ApplicationId.class);
   private static final ApplicationAttemptId ATTEMPTID = mock(ApplicationAttemptId.class);
   private static final ContainerId CONTAINERID = mock(ContainerId.class);
+  private static final String CALLER_CONTEXT = "context";
+  private static final byte[] CALLER_SIGNATURE = "signature".getBytes();
 
   @Before
   public void setUp() throws Exception {
@@ -86,15 +99,20 @@ public class TestRMAuditLogger {
     expLog.append("\tTARGET=tgt");
     assertEquals(expLog.toString(), actLog.toString());
   }
-
+  
+  private void testSuccessLogFormatHelper(boolean checkIP, ApplicationId appId,
+      ApplicationAttemptId attemptId, ContainerId containerId) {
+    testSuccessLogFormatHelper(checkIP, appId, attemptId, containerId, null);
+  }
 
   /**
    * Test the AuditLog format for successful events.
    */
   private void testSuccessLogFormatHelper(boolean checkIP, ApplicationId appId,
-      ApplicationAttemptId attemptId, ContainerId containerId) {
+      ApplicationAttemptId attemptId, ContainerId containerId,
+      CallerContext callerContext) {
     String sLog = RMAuditLogger.createSuccessLog(USER, OPERATION, TARGET,
-        appId, attemptId, containerId);
+        appId, attemptId, containerId, callerContext);
     StringBuilder expLog = new StringBuilder();
     expLog.append("USER=test\t");
     if (checkIP) {
@@ -111,6 +129,14 @@ public class TestRMAuditLogger {
     }
     if (containerId != null) {
       expLog.append("\tCONTAINERID=container_1");
+    }
+    if (callerContext != null) {
+      if (callerContext.getContext() != null) {
+        expLog.append("\tCALLERCONTEXT=context");
+      }
+      if (callerContext.getSignature() != null) {
+        expLog.append("\tCALLERSIGNATURE=signature");
+      }
     }
     assertEquals(expLog.toString(), sLog);
   }
@@ -144,18 +170,33 @@ public class TestRMAuditLogger {
     testSuccessLogFormatHelper(checkIP, APPID, null, CONTAINERID);
     testSuccessLogFormatHelper(checkIP, null, ATTEMPTID, CONTAINERID);
     testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID);
+    testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID, null);
+    testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
+        new CallerContext.Builder(null).setSignature(null).build());
+    testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
+        new CallerContext.Builder(CALLER_CONTEXT).setSignature(null).build());
+    testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
+        new CallerContext.Builder(null).setSignature(CALLER_SIGNATURE).build());
+    testSuccessLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
+        new CallerContext.Builder(CALLER_CONTEXT).setSignature(CALLER_SIGNATURE)
+            .build());
     testSuccessLogNulls(checkIP);
   }
 
-
+  private void testFailureLogFormatHelper(boolean checkIP, ApplicationId appId,
+      ApplicationAttemptId attemptId, ContainerId containerId) {
+    testFailureLogFormatHelper(checkIP, appId, attemptId, containerId, null);
+  }
+ 
   /**
    * Test the AuditLog format for failure events.
    */
   private void testFailureLogFormatHelper(boolean checkIP, ApplicationId appId,
-      ApplicationAttemptId attemptId, ContainerId containerId) {
+      ApplicationAttemptId attemptId, ContainerId containerId,
+      CallerContext callerContext) {
     String fLog =
       RMAuditLogger.createFailureLog(USER, OPERATION, PERM, TARGET, DESC,
-      appId, attemptId, containerId);
+      appId, attemptId, containerId, callerContext);
     StringBuilder expLog = new StringBuilder();
     expLog.append("USER=test\t");
     if (checkIP) {
@@ -174,6 +215,14 @@ public class TestRMAuditLogger {
     if (containerId != null) {
       expLog.append("\tCONTAINERID=container_1");
     }
+    if (callerContext != null) {
+      if (callerContext.getContext() != null) {
+        expLog.append("\tCALLERCONTEXT=context");
+      }
+      if (callerContext.getSignature() != null) {
+        expLog.append("\tCALLERSIGNATURE=signature");
+      }
+    }
     assertEquals(expLog.toString(), fLog);
   }
 
@@ -190,6 +239,16 @@ public class TestRMAuditLogger {
     testFailureLogFormatHelper(checkIP, APPID, null, CONTAINERID);
     testFailureLogFormatHelper(checkIP, null, ATTEMPTID, CONTAINERID);
     testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID);
+    
+    testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
+        new CallerContext.Builder(null).setSignature(null).build());
+    testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
+        new CallerContext.Builder(CALLER_CONTEXT).setSignature(null).build());
+    testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
+        new CallerContext.Builder(null).setSignature(CALLER_SIGNATURE).build());
+    testFailureLogFormatHelper(checkIP, APPID, ATTEMPTID, CONTAINERID,
+        new CallerContext.Builder(CALLER_CONTEXT).setSignature(CALLER_SIGNATURE)
+            .build());
   }
 
   /**
@@ -206,12 +265,19 @@ public class TestRMAuditLogger {
    * A special extension of {@link TestImpl} RPC server with 
    * {@link TestImpl#ping()} testing the audit logs.
    */
-  private class MyTestRPCServer extends TestImpl {
+  private class MyTestRPCServer extends TestRpcBase.PBServerImpl {
     @Override
-    public void ping() {
+    public TestProtos.EmptyResponseProto ping(
+        RpcController unused, TestProtos.EmptyRequestProto request)
+        throws ServiceException {
+      // Ensure clientId is received
+      byte[] clientId = Server.getClientId();
+      Assert.assertNotNull(clientId);
+      Assert.assertEquals(ClientId.BYTE_LENGTH, clientId.length);
       // test with ip set
       testSuccessLogFormat(true);
       testFailureLogFormat(true);
+      return TestProtos.EmptyResponseProto.newBuilder().build();
     }
   }
 
@@ -221,20 +287,33 @@ public class TestRMAuditLogger {
   @Test  
   public void testRMAuditLoggerWithIP() throws Exception {
     Configuration conf = new Configuration();
+    RPC.setProtocolEngine(conf, TestRpcService.class,
+        ProtobufRpcEngine.class);
+
+    // Create server side implementation
+    MyTestRPCServer serverImpl = new MyTestRPCServer();
+    BlockingService service = TestRpcServiceProtos.TestProtobufRpcProto
+        .newReflectiveBlockingService(serverImpl);
+
     // start the IPC server
-    Server server = new RPC.Builder(conf).setProtocol(TestProtocol.class)
-        .setInstance(new MyTestRPCServer()).setBindAddress("0.0.0.0")
+    Server server = new RPC.Builder(conf)
+        .setProtocol(TestRpcService.class)
+        .setInstance(service).setBindAddress("0.0.0.0")
         .setPort(0).setNumHandlers(5).setVerbose(true).build();
+
     server.start();
 
     InetSocketAddress addr = NetUtils.getConnectAddress(server);
 
     // Make a client connection and test the audit log
-    TestProtocol proxy = (TestProtocol)RPC.getProxy(TestProtocol.class,
-                           TestProtocol.versionID, addr, conf);
+    TestRpcService proxy = RPC.getProxy(TestRpcService.class,
+        TestProtocol.versionID, addr, conf);
     // Start the testcase
-    proxy.ping();
+    TestProtos.EmptyRequestProto pingRequest =
+        TestProtos.EmptyRequestProto.newBuilder().build();
+    proxy.ping(null, pingRequest);
 
     server.stop();
+    RPC.stopProxy(proxy);
   }
 }

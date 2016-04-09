@@ -25,6 +25,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -52,6 +53,7 @@ import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.Options.ChecksumOpt;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
+import org.apache.hadoop.fs.QuotaUsage;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
@@ -512,6 +514,31 @@ public class DistributedFileSystem extends FileSystem {
   }
 
   @Override
+  public void unsetStoragePolicy(final Path src)
+      throws IOException {
+    statistics.incrementWriteOps(1);
+    Path absF = fixRelativePart(src);
+    new FileSystemLinkResolver<Void>() {
+      @Override
+      public Void doCall(final Path p) throws IOException {
+        dfs.unsetStoragePolicy(getPathName(p));
+        return null;
+      }
+      @Override
+      public Void next(final FileSystem fs, final Path p) throws IOException {
+        if (fs instanceof DistributedFileSystem) {
+          ((DistributedFileSystem) fs).unsetStoragePolicy(p);
+          return null;
+        } else {
+          throw new UnsupportedOperationException(
+              "Cannot perform unsetStoragePolicy on a "
+                  + "non-DistributedFileSystem: " + src + " -> " + p);
+        }
+      }
+    }.resolve(this, absF);
+  }
+
+  @Override
   public BlockStoragePolicySpi getStoragePolicy(Path path) throws IOException {
     statistics.incrementReadOps(1);
     Path absF = fixRelativePart(path);
@@ -581,7 +608,7 @@ public class DistributedFileSystem extends FileSystem {
       for (int i=0; i<psrcs.length; i++) {
         srcsStr[i] = getPathName(srcs[i]);
       }
-      dfs.concat(getPathName(trg), srcsStr);
+      dfs.concat(getPathName(absF), srcsStr);
     } catch (UnresolvedLinkException e) {
       // Exception could be from trg or any src.
       // Fully resolve trg and srcs. Fail if any of them are a symlink.
@@ -718,6 +745,24 @@ public class DistributedFileSystem extends FileSystem {
       public ContentSummary next(final FileSystem fs, final Path p)
           throws IOException {
         return fs.getContentSummary(p);
+      }
+    }.resolve(this, absF);
+  }
+
+  @Override
+  public QuotaUsage getQuotaUsage(Path f) throws IOException {
+    statistics.incrementReadOps(1);
+    Path absF = fixRelativePart(f);
+    return new FileSystemLinkResolver<QuotaUsage>() {
+      @Override
+      public QuotaUsage doCall(final Path p)
+              throws IOException, UnresolvedLinkException {
+        return dfs.getQuotaUsage(getPathName(p));
+      }
+      @Override
+      public QuotaUsage next(final FileSystem fs, final Path p)
+              throws IOException {
+        return fs.getQuotaUsage(p);
       }
     }.resolve(this, absF);
   }
@@ -1092,6 +1137,15 @@ public class DistributedFileSystem extends FileSystem {
    */
   public long getMissingBlocksCount() throws IOException {
     return dfs.getMissingBlocksCount();
+  }
+
+  /**
+   * Returns count of blocks pending on deletion.
+   *
+   * @throws IOException
+   */
+  public long getPendingDeletionBlocksCount() throws IOException {
+    return dfs.getPendingDeletionBlocksCount();
   }
 
   /**
@@ -2304,5 +2358,75 @@ public class DistributedFileSystem extends FileSystem {
   public Collection<ErasureCodingPolicy> getAllErasureCodingPolicies()
       throws IOException {
     return Arrays.asList(dfs.getErasureCodingPolicies());
+  }
+
+  /**
+   * Get the root directory of Trash for a path in HDFS.
+   * 1. File in encryption zone returns /ez1/.Trash/username
+   * 2. File not in encryption zone, or encountered exception when checking
+   *    the encryption zone of the path, returns /users/username/.Trash
+   * Caller appends either Current or checkpoint timestamp for trash destination
+   * @param path the trash root of the path to be determined.
+   * @return trash root
+   */
+  @Override
+  public Path getTrashRoot(Path path) {
+    if ((path == null) || path.isRoot() || !dfs.isHDFSEncryptionEnabled()) {
+      return super.getTrashRoot(path);
+    }
+
+    String parentSrc = path.getParent().toUri().getPath();
+    try {
+      EncryptionZone ez = dfs.getEZForPath(parentSrc);
+      if ((ez != null)) {
+        return this.makeQualified(
+            new Path(new Path(ez.getPath(), FileSystem.TRASH_PREFIX),
+                dfs.ugi.getShortUserName()));
+      }
+    } catch (IOException e) {
+      DFSClient.LOG.warn("Exception in checking the encryption zone for the " +
+          "path " + parentSrc + ". " + e.getMessage());
+    }
+    return super.getTrashRoot(path);
+  }
+
+  /**
+   * Get all the trash roots of HDFS for current user or for all the users.
+   * 1. File deleted from non-encryption zone /user/username/.Trash
+   * 2. File deleted from encryption zones
+   *    e.g., ez1 rooted at /ez1 has its trash root at /ez1/.Trash/$USER
+   * @param allUsers return trashRoots of all users if true, used by emptier
+   * @return trash roots of HDFS
+   */
+  @Override
+  public Collection<FileStatus> getTrashRoots(boolean allUsers) {
+    List<FileStatus> ret = new ArrayList<>();
+    // Get normal trash roots
+    ret.addAll(super.getTrashRoots(allUsers));
+
+    try {
+      // Get EZ Trash roots
+      final RemoteIterator<EncryptionZone> it = dfs.listEncryptionZones();
+      while (it.hasNext()) {
+        Path ezTrashRoot = new Path(it.next().getPath(),
+            FileSystem.TRASH_PREFIX);
+        if (allUsers) {
+          for (FileStatus candidate : listStatus(ezTrashRoot)) {
+            if (exists(candidate.getPath())) {
+              ret.add(candidate);
+            }
+          }
+        } else {
+          Path userTrash = new Path(ezTrashRoot, System.getProperty(
+              "user.name"));
+          if (exists(userTrash)) {
+            ret.add(getFileStatus(userTrash));
+          }
+        }
+      }
+    } catch (IOException e){
+      DFSClient.LOG.warn("Cannot get all encrypted trash roots", e);
+    }
+    return ret;
   }
 }

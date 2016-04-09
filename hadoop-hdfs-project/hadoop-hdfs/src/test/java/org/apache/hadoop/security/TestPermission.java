@@ -51,6 +51,7 @@ public class TestPermission {
   final private static Path CHILD_DIR2 = new Path(ROOT_PATH, "child2");
   final private static Path CHILD_FILE1 = new Path(ROOT_PATH, "file1");
   final private static Path CHILD_FILE2 = new Path(ROOT_PATH, "file2");
+  final private static Path CHILD_FILE3 = new Path(ROOT_PATH, "file3");
 
   final private static int FILE_LEN = 100;
   final private static Random RAN = new Random();
@@ -83,31 +84,18 @@ public class TestPermission {
     Configuration conf = new Configuration();
     FsPermission.setUMask(conf, perm);
     assertEquals(18, FsPermission.getUMask(conf).toShort());
-    
-    // Test 2 - old configuration key set with decimal 
-    // umask value should be handled
-    perm = new FsPermission((short)18);
-    conf = new Configuration();
-    conf.set(FsPermission.DEPRECATED_UMASK_LABEL, "18");
-    assertEquals(18, FsPermission.getUMask(conf).toShort());
-    
-    // Test 3 - old configuration key overrides the new one
-    conf = new Configuration();
-    conf.set(FsPermission.DEPRECATED_UMASK_LABEL, "18");
-    conf.set(FsPermission.UMASK_LABEL, "000");
-    assertEquals(18, FsPermission.getUMask(conf).toShort());
-    
-    // Test 4 - new configuration key is handled
+
+    // Test 2 - new configuration key is handled
     conf = new Configuration();
     conf.set(FsPermission.UMASK_LABEL, "022");
     assertEquals(18, FsPermission.getUMask(conf).toShort());
 
-    // Test 5 - equivalent valid umask
+    // Test 3 - equivalent valid umask
     conf = new Configuration();
     conf.set(FsPermission.UMASK_LABEL, "0022");
     assertEquals(18, FsPermission.getUMask(conf).toShort());
 
-    // Test 6 - invalid umask
+    // Test 4 - invalid umask
     conf = new Configuration();
     conf.set(FsPermission.UMASK_LABEL, "1222");
     try {
@@ -117,7 +105,7 @@ public class TestPermission {
      //pass, exception successfully trigger
     }
 
-    // Test 7 - invalid umask
+    // Test 5 - invalid umask
     conf = new Configuration();
     conf.set(FsPermission.UMASK_LABEL, "01222");
     try {
@@ -283,6 +271,18 @@ public class TestPermission {
       final Path RENAME_PATH = new Path("/foo/bar");
       userfs.mkdirs(RENAME_PATH);
       assertTrue(canRename(userfs, RENAME_PATH, CHILD_DIR1));
+      // test permissions on files that do not exist
+      assertFalse(userfs.exists(CHILD_FILE3));
+      try {
+        userfs.setOwner(CHILD_FILE3, "foo", "bar");
+        fail("setOwner should fail for non-exist file");
+      } catch (java.io.FileNotFoundException ignored) {
+      }
+      try {
+        userfs.setPermission(CHILD_FILE3, new FsPermission((short) 0777));
+        fail("setPermission should fail for non-exist file");
+      } catch (java.io.FileNotFoundException ignored) {
+      }
     } finally {
       cluster.shutdown();
     }

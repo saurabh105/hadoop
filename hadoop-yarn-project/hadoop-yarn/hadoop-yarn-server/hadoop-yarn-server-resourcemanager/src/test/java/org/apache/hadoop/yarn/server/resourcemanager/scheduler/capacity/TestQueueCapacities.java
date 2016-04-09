@@ -43,7 +43,10 @@ public class TestQueueCapacities {
         { "UsedCapacity" }, 
         { "AbsoluteUsedCapacity" },
         { "MaximumCapacity" }, 
-        { "AbsoluteMaximumCapacity" } });
+        { "AbsoluteMaximumCapacity" },
+        { "MaxAMResourcePercentage" },
+        { "ReservedCapacity" },
+        { "AbsoluteReservedCapacity" }});
   }
 
   public TestQueueCapacities(String suffix) {

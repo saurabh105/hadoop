@@ -367,7 +367,8 @@ public class TestContainerAllocation {
     
     CapacityScheduler cs = (CapacityScheduler) rm1.getResourceScheduler();
     RMNode rmNode1 = rm1.getRMContext().getRMNodes().get(nm1.getNodeId());
-    
+    LeafQueue leafQueue = (LeafQueue) cs.getQueue("default");
+
     // Do node heartbeats 2 times
     // First time will allocate container for app1, second time will reserve
     // container for app2
@@ -388,12 +389,16 @@ public class TestContainerAllocation {
     
     // NM1 has available resource = 2G (8G - 2 * 1G - 4G)
     Assert.assertEquals(2 * GB, cs.getNode(nm1.getNodeId())
-        .getAvailableResource().getMemory());
+        .getUnallocatedResource().getMemory());
     Assert.assertNotNull(cs.getNode(nm1.getNodeId()).getReservedContainer());
     // Usage of queue = 4G + 2 * 1G + 4G (reserved)
     Assert.assertEquals(10 * GB, cs.getRootQueue().getQueueResourceUsage()
         .getUsed().getMemory());
-    
+    Assert.assertEquals(4 * GB, cs.getRootQueue().getQueueResourceUsage()
+        .getReserved().getMemory());
+    Assert.assertEquals(4 * GB, leafQueue.getQueueResourceUsage().getReserved()
+        .getMemory());
+
     // Cancel asks of app2 and re-kick RM
     am2.allocate("*", 4 * GB, 0, new ArrayList<ContainerId>());
     cs.handle(new NodeUpdateSchedulerEvent(rmNode1));
@@ -401,10 +406,14 @@ public class TestContainerAllocation {
     // App2's reservation will be cancelled
     Assert.assertTrue(schedulerApp2.getReservedContainers().size() == 0);
     Assert.assertEquals(2 * GB, cs.getNode(nm1.getNodeId())
-        .getAvailableResource().getMemory());
+        .getUnallocatedResource().getMemory());
     Assert.assertNull(cs.getNode(nm1.getNodeId()).getReservedContainer());
     Assert.assertEquals(6 * GB, cs.getRootQueue().getQueueResourceUsage()
         .getUsed().getMemory());
+    Assert.assertEquals(0, cs.getRootQueue().getQueueResourceUsage()
+        .getReserved().getMemory());
+    Assert.assertEquals(0, leafQueue.getQueueResourceUsage().getReserved()
+        .getMemory());
 
     rm1.close();
   }

@@ -52,6 +52,11 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String  IPC_CLIENT_PING_KEY = "ipc.client.ping";
   /** Default value of IPC_CLIENT_PING_KEY */
   public static final boolean IPC_CLIENT_PING_DEFAULT = true;
+  /** Timeout value for RPC client on waiting for response. */
+  public static final String IPC_CLIENT_RPC_TIMEOUT_KEY =
+      "ipc.client.rpc-timeout.ms";
+  /** Default value for IPC_CLIENT_RPC_TIMEOUT_KEY. */
+  public static final int IPC_CLIENT_RPC_TIMEOUT_DEFAULT = 0;
   /** Responses larger than this will be logged */
   public static final String  IPC_SERVER_RPC_MAX_RESPONSE_SIZE_KEY =
     "ipc.server.max.response.size";
@@ -85,13 +90,21 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /**
    * CallQueue related settings. These are not used directly, but rather
    * combined with a namespace and port. For instance:
-   * IPC_CALLQUEUE_NAMESPACE + ".8020." + IPC_CALLQUEUE_IMPL_KEY
+   * IPC_NAMESPACE + ".8020." + IPC_CALLQUEUE_IMPL_KEY
    */
-  public static final String IPC_CALLQUEUE_NAMESPACE = "ipc";
+  public static final String IPC_NAMESPACE = "ipc";
   public static final String IPC_CALLQUEUE_IMPL_KEY = "callqueue.impl";
-  public static final String IPC_CALLQUEUE_IDENTITY_PROVIDER_KEY = "identity-provider.impl";
+  public static final String IPC_SCHEDULER_IMPL_KEY = "scheduler.impl";
+  public static final String IPC_IDENTITY_PROVIDER_KEY = "identity-provider.impl";
   public static final String IPC_BACKOFF_ENABLE = "backoff.enable";
   public static final boolean IPC_BACKOFF_ENABLE_DEFAULT = false;
+
+  /**
+   * IPC scheduler priority levels.
+   */
+  public static final String IPC_SCHEDULER_PRIORITY_LEVELS_KEY =
+      "scheduler.priority.levels";
+  public static final int IPC_SCHEDULER_PRIORITY_LEVELS_DEFAULT_KEY = 4;
 
   /** This is for specifying the implementation for the mappings from
    * hostnames to the racks they belong to
@@ -198,7 +211,19 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
       "hadoop.security.token.service.use_ip";
   public static final boolean HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT =
       true;
-  
+
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml .</a> */
+  public static final String HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_ENABLED_KEY =
+      "hadoop.security.dns.log-slow-lookups.enabled";
+  public static final boolean
+      HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_ENABLED_DEFAULT = false;
+  /** See <a href="{@docRoot}/../core-default.html">core-default.xml .</a> */
+  public static final String
+      HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_KEY =
+      "hadoop.security.dns.log-slow-lookups.threshold.ms";
+  public static final int
+      HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_DEFAULT = 1000;
+
   /**
    * HA health monitor and failover controller.
    */

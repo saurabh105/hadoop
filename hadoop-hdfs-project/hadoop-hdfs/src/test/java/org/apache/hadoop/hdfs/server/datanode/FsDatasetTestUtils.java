@@ -29,6 +29,7 @@ import org.apache.hadoop.util.ReflectionUtils;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.Iterator;
 
 /**
  * Provide block access for FsDataset white box tests.
@@ -67,6 +68,14 @@ public interface FsDatasetTestUtils {
     public boolean isSimulated() {
       return false;
     }
+
+    /**
+     * Get the default number of data directories for underlying storage per
+     * DataNode.
+     *
+     * @return The default number of data dirs per DataNode.
+     */
+    abstract public int getDefaultNumOfDataDirs();
   }
 
   /**
@@ -206,4 +215,65 @@ public interface FsDatasetTestUtils {
    * @throws IOException on I/O error.
    */
   void injectCorruptReplica(ExtendedBlock block) throws IOException;
+
+  /**
+   * Get the replica of a block. Returns null if it does not exist.
+   * @param block the block whose replica will be returned.
+   * @return Replica for the block.
+   */
+  Replica fetchReplica(ExtendedBlock block);
+
+  /**
+   * @return The default value of number of data dirs per DataNode in
+   * MiniDFSCluster.
+   */
+  int getDefaultNumOfDataDirs();
+
+  /**
+   * Obtain the raw capacity of underlying storage per DataNode.
+   */
+  long getRawCapacity() throws IOException;
+
+  /**
+   * Get the persistently stored length of the block.
+   */
+  long getStoredDataLength(ExtendedBlock block) throws IOException;
+
+  /**
+   * Get the persistently stored generation stamp.
+   */
+  long getStoredGenerationStamp(ExtendedBlock block) throws IOException;
+
+  /**
+   * Change the persistently stored generation stamp.
+   * @param block the block whose generation stamp will be changed
+   * @param newGenStamp the new generation stamp
+   * @throws IOException
+   */
+  void changeStoredGenerationStamp(ExtendedBlock block, long newGenStamp)
+      throws IOException;
+
+  /** Get all stored replicas in the specified block pool. */
+  Iterator<Replica> getStoredReplicas(String bpid) throws IOException;
+
+  /**
+   * Get the number of pending async deletions.
+   */
+  long getPendingAsyncDeletions();
+
+  /**
+   * Verify the existence of the block pool.
+   *
+   * @param bpid block pool ID
+   * @throws IOException if the block pool does not exist.
+   */
+  void verifyBlockPoolExists(String bpid) throws IOException;
+
+  /**
+   * Verify that the block pool does not exist.
+   *
+   * @param bpid block pool ID
+   * @throws IOException if the block pool does exist.
+   */
+  void verifyBlockPoolMissing(String bpid) throws IOException;
 }

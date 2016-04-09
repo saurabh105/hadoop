@@ -1198,9 +1198,16 @@ public abstract class TaskAttemptImpl implements
             JobEventType.INTERNAL_ERROR));
       }
       if (oldState != getInternalState()) {
-          LOG.info(attemptId + " TaskAttempt Transitioned from " 
-           + oldState + " to "
-           + getInternalState());
+        if (getInternalState() == TaskAttemptStateInternal.FAILED) {
+          String nodeId = null == this.container ? "Not-assigned"
+              : this.container.getNodeId().toString();
+          LOG.info(attemptId + " transitioned from state " + oldState + " to "
+              + getInternalState() + ", event type is " + event.getType()
+              + " and nodeId=" + nodeId);
+        } else {
+          LOG.info(attemptId + " TaskAttempt Transitioned from " + oldState
+              + " to " + getInternalState());
+        }
       }
     } finally {
       writeLock.unlock();
@@ -1399,29 +1406,36 @@ public abstract class TaskAttemptImpl implements
   
   private static void updateMillisCounters(JobCounterUpdateEvent jce,
       TaskAttemptImpl taskAttempt) {
-    TaskType taskType = taskAttempt.getID().getTaskId().getTaskType();
+    // if container/resource if not allocated, do not update
+    if (null == taskAttempt.container ||
+        null == taskAttempt.container.getResource()) {
+      return;
+    }
     long duration = (taskAttempt.getFinishTime() - taskAttempt.getLaunchTime());
-    int mbRequired =
-        taskAttempt.getMemoryRequired(taskAttempt.conf, taskType);
-    int vcoresRequired = taskAttempt.getCpuRequired(taskAttempt.conf, taskType);
-
+    Resource allocatedResource = taskAttempt.container.getResource();
+    int mbAllocated = allocatedResource.getMemory();
+    int vcoresAllocated = allocatedResource.getVirtualCores();
     int minSlotMemSize = taskAttempt.conf.getInt(
-      YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB,
-      YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_MB);
+        YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB,
+        YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_MB);
+    int simSlotsAllocated = minSlotMemSize == 0 ? 0 :
+        (int) Math.ceil((float) mbAllocated / minSlotMemSize);
 
-    int simSlotsRequired =
-        minSlotMemSize == 0 ? 0 : (int) Math.ceil((float) mbRequired
-            / minSlotMemSize);
-
+    TaskType taskType = taskAttempt.getID().getTaskId().getTaskType();
     if (taskType == TaskType.MAP) {
-      jce.addCounterUpdate(JobCounter.SLOTS_MILLIS_MAPS, simSlotsRequired * duration);
-      jce.addCounterUpdate(JobCounter.MB_MILLIS_MAPS, duration * mbRequired);
-      jce.addCounterUpdate(JobCounter.VCORES_MILLIS_MAPS, duration * vcoresRequired);
+      jce.addCounterUpdate(JobCounter.SLOTS_MILLIS_MAPS,
+          simSlotsAllocated * duration);
+      jce.addCounterUpdate(JobCounter.MB_MILLIS_MAPS, duration * mbAllocated);
+      jce.addCounterUpdate(JobCounter.VCORES_MILLIS_MAPS,
+          duration * vcoresAllocated);
       jce.addCounterUpdate(JobCounter.MILLIS_MAPS, duration);
     } else {
-      jce.addCounterUpdate(JobCounter.SLOTS_MILLIS_REDUCES, simSlotsRequired * duration);
-      jce.addCounterUpdate(JobCounter.MB_MILLIS_REDUCES, duration * mbRequired);
-      jce.addCounterUpdate(JobCounter.VCORES_MILLIS_REDUCES, duration * vcoresRequired);
+      jce.addCounterUpdate(JobCounter.SLOTS_MILLIS_REDUCES,
+          simSlotsAllocated * duration);
+      jce.addCounterUpdate(JobCounter.MB_MILLIS_REDUCES,
+          duration * mbAllocated);
+      jce.addCounterUpdate(JobCounter.VCORES_MILLIS_REDUCES,
+          duration * vcoresAllocated);
       jce.addCounterUpdate(JobCounter.MILLIS_REDUCES, duration);
     }
   }

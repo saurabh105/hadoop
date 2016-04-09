@@ -60,6 +60,7 @@ import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.api.records.impl.pb.ResourceRequestPBImpl;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.exceptions.InvalidLabelResourceRequestException;
 import org.apache.hadoop.yarn.exceptions.InvalidResourceBlacklistRequestException;
 import org.apache.hadoop.yarn.exceptions.InvalidResourceRequestException;
 import org.apache.hadoop.yarn.ipc.YarnRPC;
@@ -94,7 +95,8 @@ public class TestSchedulerUtils {
   private static final Log LOG = LogFactory.getLog(TestSchedulerUtils.class);
   
   private RMContext rmContext = getMockRMContext();
-  
+  private static YarnConfiguration conf = new YarnConfiguration();
+
   @Test (timeout = 30000)
   public void testNormalizeRequest() {
     ResourceCalculator resourceCalculator = new DefaultResourceCalculator();
@@ -191,7 +193,7 @@ public class TestSchedulerUtils {
     assertEquals(2048, ask.getCapability().getMemory());
   }
   
-  @Test (timeout = 30000)
+  @Test(timeout = 30000)
   public void testValidateResourceRequestWithErrorLabelsPermission()
       throws IOException {
     // mock queue and scheduler
@@ -336,7 +338,7 @@ public class TestSchedulerUtils {
       e.printStackTrace();
       fail("Should be valid when request labels is empty");
     }
-    
+    boolean invalidlabelexception=false;
     // queue doesn't have label, failed (when request any label)
     try {
       // set queue accessible node labels to empty
@@ -354,12 +356,15 @@ public class TestSchedulerUtils {
       SchedulerUtils.normalizeAndvalidateRequest(resReq, maxResource, "queue",
           scheduler, rmContext);
       fail("Should fail");
+    } catch (InvalidLabelResourceRequestException e) {
+      invalidlabelexception=true;
     } catch (InvalidResourceRequestException e) {
     } finally {
       rmContext.getNodeLabelManager().removeFromClusterNodeLabels(
           Arrays.asList("x"));
     }
-    
+    Assert.assertTrue("InvalidLabelResourceRequestException excpeted",
+        invalidlabelexception);
     // queue is "*", always succeeded
     try {
       // set queue accessible node labels to empty
@@ -459,6 +464,34 @@ public class TestSchedulerUtils {
     } finally {
       rmContext.getNodeLabelManager().removeFromClusterNodeLabels(
           Arrays.asList("x"));
+    }
+    try {
+      Resource resource = Resources.createResource(0,
+          YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_VCORES);
+      ResourceRequest resReq1 = BuilderUtils
+          .newResourceRequest(mock(Priority.class), "*", resource, 1, "x");
+      SchedulerUtils.normalizeAndvalidateRequest(resReq1, maxResource, "queue",
+          scheduler, rmContext);
+      fail("Should fail");
+    } catch (InvalidResourceRequestException e) {
+      assertEquals("Invalid label resource request, cluster do not contain , "
+          + "label= x", e.getMessage());
+    }
+
+    try {
+      rmContext.getYarnConfiguration()
+          .set(YarnConfiguration.NODE_LABELS_ENABLED, "false");
+      Resource resource = Resources.createResource(0,
+          YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_VCORES);
+      ResourceRequest resReq1 = BuilderUtils
+          .newResourceRequest(mock(Priority.class), "*", resource, 1, "x");
+      SchedulerUtils.normalizeAndvalidateRequest(resReq1, maxResource, "queue",
+          scheduler, rmContext);
+      Assert.assertEquals(RMNodeLabelsManager.NO_LABEL,
+          resReq1.getNodeLabelExpression());
+    } catch (InvalidResourceRequestException e) {
+      assertEquals("Invalid resource request, node label not enabled but "
+          + "request contains label expression", e.getMessage());
     }
   }
 
@@ -769,6 +802,9 @@ public class TestSchedulerUtils {
     RMContext rmContext = mock(RMContext.class);
     RMNodeLabelsManager nlm = new NullRMNodeLabelsManager();
     nlm.init(new Configuration(false));
+    when(rmContext.getYarnConfiguration()).thenReturn(conf);
+    rmContext.getYarnConfiguration().set(YarnConfiguration.NODE_LABELS_ENABLED,
+        "true");
     when(rmContext.getNodeLabelManager()).thenReturn(nlm);
     return rmContext;
   }

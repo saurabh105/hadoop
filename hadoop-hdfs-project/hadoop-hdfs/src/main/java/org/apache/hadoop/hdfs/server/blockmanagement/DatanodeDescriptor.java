@@ -42,7 +42,7 @@ import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.CachedBlock;
-import org.apache.hadoop.hdfs.server.protocol.BlockECRecoveryCommand.BlockECRecoveryInfo;
+import org.apache.hadoop.hdfs.server.protocol.BlockECReconstructionCommand.BlockECReconstructionInfo;
 import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage.State;
@@ -190,7 +190,8 @@ public class DatanodeDescriptor extends DatanodeInfo {
   // This is an optimization, because contains takes O(n) time on Arraylist
   private boolean isAlive = false;
   private boolean needKeyUpdate = false;
-  
+  private boolean forceRegistration = false;
+
   // A system administrator can tune the balancer bandwidth parameter
   // (dfs.balance.bandwidthPerSec) dynamically by calling
   // "dfsadmin -setBalanacerBandwidth <newbandwidth>", at which point the
@@ -203,7 +204,7 @@ public class DatanodeDescriptor extends DatanodeInfo {
   private final BlockQueue<BlockTargetPair> replicateBlocks =
       new BlockQueue<>();
   /** A queue of blocks to be erasure coded by this datanode */
-  private final BlockQueue<BlockECRecoveryInfo> erasurecodeBlocks =
+  private final BlockQueue<BlockECReconstructionInfo> erasurecodeBlocks =
       new BlockQueue<>();
   /** A queue of blocks to be recovered by this datanode */
   private final BlockQueue<BlockInfo> recoverBlocks = new BlockQueue<>();
@@ -290,11 +291,11 @@ public class DatanodeDescriptor extends DatanodeInfo {
     this.isAlive = isAlive;
   }
 
-  public boolean needKeyUpdate() {
+  public synchronized boolean needKeyUpdate() {
     return needKeyUpdate;
   }
 
-  public void setNeedKeyUpdate(boolean needKeyUpdate) {
+  public synchronized void setNeedKeyUpdate(boolean needKeyUpdate) {
     this.needKeyUpdate = needKeyUpdate;
   }
 
@@ -602,12 +603,12 @@ public class DatanodeDescriptor extends DatanodeInfo {
    */
   void addBlockToBeErasureCoded(ExtendedBlock block,
       DatanodeDescriptor[] sources, DatanodeStorageInfo[] targets,
-      short[] liveBlockIndices, ErasureCodingPolicy ecPolicy) {
+      byte[] liveBlockIndices, ErasureCodingPolicy ecPolicy) {
     assert (block != null && sources != null && sources.length > 0);
-    BlockECRecoveryInfo task = new BlockECRecoveryInfo(block, sources, targets,
-        liveBlockIndices, ecPolicy);
+    BlockECReconstructionInfo task = new BlockECReconstructionInfo(block,
+        sources, targets, liveBlockIndices, ecPolicy);
     erasurecodeBlocks.offer(task);
-    BlockManager.LOG.debug("Adding block recovery task " + task + "to "
+    BlockManager.LOG.debug("Adding block reconstruction task " + task + "to "
         + getName() + ", current queue size is " + erasurecodeBlocks.size());
   }
 
@@ -654,7 +655,8 @@ public class DatanodeDescriptor extends DatanodeInfo {
     return replicateBlocks.poll(maxTransfers);
   }
 
-  public List<BlockECRecoveryInfo> getErasureCodeCommand(int maxTransfers) {
+  public List<BlockECReconstructionInfo> getErasureCodeCommand(
+      int maxTransfers) {
     return erasurecodeBlocks.poll(maxTransfers);
   }
 
@@ -863,19 +865,20 @@ public class DatanodeDescriptor extends DatanodeInfo {
       storage.setBlockReportCount(0);
     }
     heartbeatedSinceRegistration = false;
+    forceRegistration = false;
   }
 
   /**
    * @return balancer bandwidth in bytes per second for this datanode
    */
-  public long getBalancerBandwidth() {
+  public synchronized long getBalancerBandwidth() {
     return this.bandwidth;
   }
 
   /**
    * @param bandwidth balancer bandwidth in bytes per second for this datanode
    */
-  public void setBalancerBandwidth(long bandwidth) {
+  public synchronized void setBalancerBandwidth(long bandwidth) {
     this.bandwidth = bandwidth;
   }
 
@@ -949,6 +952,14 @@ public class DatanodeDescriptor extends DatanodeInfo {
         return false;
     }
     return true;
- }
+  }
+
+  public void setForceRegistration(boolean force) {
+    forceRegistration = force;
+  }
+
+  public boolean isRegistered() {
+    return isAlive() && !forceRegistration;
+  }
 }
 

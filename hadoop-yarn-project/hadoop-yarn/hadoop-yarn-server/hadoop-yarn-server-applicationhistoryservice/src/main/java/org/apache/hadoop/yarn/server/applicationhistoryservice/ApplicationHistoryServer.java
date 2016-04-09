@@ -86,7 +86,14 @@ public class ApplicationHistoryServer extends CompositeService {
 
   @Override
   protected void serviceInit(Configuration conf) throws Exception {
-    // init timeline services first
+
+    // do security login first.
+    try {
+      doSecureLogin(conf);
+    } catch(IOException ie) {
+      throw new YarnRuntimeException("Failed to login", ie);
+    }
+    // init timeline services
     timelineStore = createTimelineStore(conf);
     addIfService(timelineStore);
     secretManagerService = createTimelineDelegationTokenSecretManagerService(conf);
@@ -103,22 +110,14 @@ public class ApplicationHistoryServer extends CompositeService {
 
     DefaultMetricsSystem.initialize("ApplicationHistoryServer");
     JvmMetrics jm = JvmMetrics.initSingleton("ApplicationHistoryServer", null);
-    pauseMonitor = new JvmPauseMonitor(conf);
+    pauseMonitor = new JvmPauseMonitor();
+    addService(pauseMonitor);
     jm.setPauseMonitor(pauseMonitor);
     super.serviceInit(conf);
   }
 
   @Override
   protected void serviceStart() throws Exception {
-    try {
-      doSecureLogin(getConfig());
-    } catch(IOException ie) {
-      throw new YarnRuntimeException("Failed to login", ie);
-    }
-
-    if (pauseMonitor != null) {
-      pauseMonitor.start();
-    }
     super.serviceStart();
     startWebApp();
   }
@@ -127,9 +126,6 @@ public class ApplicationHistoryServer extends CompositeService {
   protected void serviceStop() throws Exception {
     if (webApp != null) {
       webApp.stop();
-    }
-    if (pauseMonitor != null) {
-      pauseMonitor.stop();
     }
     DefaultMetricsSystem.shutdown();
     super.serviceStop();
@@ -141,10 +137,14 @@ public class ApplicationHistoryServer extends CompositeService {
     return this.ahsClientService;
   }
 
+  private InetSocketAddress getListenerAddress() {
+    return this.webApp.httpServer().getConnectorAddress(0);
+  }
+
   @Private
   @VisibleForTesting
   public int getPort() {
-    return this.webApp.httpServer().getConnectorAddress(0).getPort();
+    return this.getListenerAddress().getPort();
   }
 
   /**
@@ -229,8 +229,9 @@ public class ApplicationHistoryServer extends CompositeService {
   }
 
   private TimelineDataManager createTimelineDataManager(Configuration conf) {
-    return new TimelineDataManager(
-        timelineStore, new TimelineACLsManager(conf));
+    TimelineACLsManager aclsMgr = new TimelineACLsManager(conf);
+    aclsMgr.setTimelineStore(timelineStore);
+    return new TimelineDataManager(timelineStore, aclsMgr);
   }
 
   @SuppressWarnings("unchecked")
@@ -297,16 +298,21 @@ public class ApplicationHistoryServer extends CompositeService {
                           YarnConfiguration.TIMELINE_SERVICE_BIND_HOST,
                           WebAppUtils.getAHSWebAppURLWithoutScheme(conf));
     try {
-      AHSWebApp ahsWebApp = new AHSWebApp(timelineDataManager, ahsClientService);
+      AHSWebApp ahsWebApp =
+          new AHSWebApp(timelineDataManager, ahsClientService);
       webApp =
           WebApps
             .$for("applicationhistory", ApplicationHistoryClientService.class,
                 ahsClientService, "ws")
-             .with(conf).withAttribute(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
-                 conf.get(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS)).at(bindAddress).build(ahsWebApp);
+             .with(conf)
+              .withAttribute(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
+                 conf.get(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS))
+              .withCSRFProtection(YarnConfiguration.TIMELINE_CSRF_PREFIX)
+              .at(bindAddress).build(ahsWebApp);
        HttpServer2 httpServer = webApp.httpServer();
 
-       String[] names = conf.getTrimmedStrings(YarnConfiguration.TIMELINE_SERVICE_UI_NAMES);
+       String[] names = conf.getTrimmedStrings(
+           YarnConfiguration.TIMELINE_SERVICE_UI_NAMES);
        WebAppContext webAppContext = httpServer.getWebAppContext();
 
        for (String name : names) {
@@ -331,6 +337,10 @@ public class ApplicationHistoryServer extends CompositeService {
          httpServer.addContext(uiWebAppContext, true);
        }
        httpServer.start();
+       conf.updateConnectAddr(YarnConfiguration.TIMELINE_SERVICE_BIND_HOST,
+        YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS,
+        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_WEBAPP_ADDRESS,
+        this.getListenerAddress());
        LOG.info("Instantiating AHSWebApp at " + getPort());
     } catch (Exception e) {
       String msg = "AHSWebApp failed to start.";

@@ -47,7 +47,6 @@ import org.apache.hadoop.io.ReadaheadPool.ReadaheadRequest;
 import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.net.SocketOutputStream;
 import org.apache.hadoop.util.DataChecksum;
-import org.apache.htrace.core.Sampler;
 import org.apache.htrace.core.TraceScope;
 
 import static org.apache.hadoop.io.nativeio.NativeIO.POSIX.POSIX_FADV_DONTNEED;
@@ -55,6 +54,7 @@ import static org.apache.hadoop.io.nativeio.NativeIO.POSIX.POSIX_FADV_SEQUENTIAL
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import org.slf4j.Logger;
 
 /**
  * Reads a block from the disk and sends it to a recipient.
@@ -97,7 +97,7 @@ import com.google.common.base.Preconditions;
  *  no checksum error, it replies to DataNode with OP_STATUS_CHECKSUM_OK.
  */
 class BlockSender implements java.io.Closeable {
-  static final Log LOG = DataNode.LOG;
+  static final Logger LOG = DataNode.LOG;
   static final Log ClientTraceLog = DataNode.ClientTraceLog;
   private static final boolean is32Bit = 
       System.getProperty("sun.arch.data.model").equals("32");
@@ -300,11 +300,15 @@ class BlockSender implements java.io.Closeable {
 
             // The meta file will contain only the header if the NULL checksum
             // type was used, or if the replica was written to transient storage.
+            // Also, when only header portion of a data packet was transferred
+            // and then pipeline breaks, the meta file can contain only the
+            // header and 0 byte in the block data file.
             // Checksum verification is not performed for replicas on transient
             // storage.  The header is important for determining the checksum
             // type later when lazy persistence copies the block to non-transient
             // storage and computes the checksum.
-            if (metaIn.getLength() > BlockMetadataHeader.getHeaderSize()) {
+            if (!replica.isOnTransientStorage() &&
+                metaIn.getLength() >= BlockMetadataHeader.getHeaderSize()) {
               checksumIn = new DataInputStream(new BufferedInputStream(
                   metaIn, IO_FILE_BUFFER_SIZE));
   
@@ -644,7 +648,7 @@ class BlockSender implements java.io.Closeable {
     try {
       checksumIn.readFully(buf, checksumOffset, checksumLen);
     } catch (IOException e) {
-      LOG.warn(" Could not read or failed to veirfy checksum for data"
+      LOG.warn(" Could not read or failed to verify checksum for data"
           + " at offset " + offset + " for block " + block, e);
       IOUtils.closeStream(checksumIn);
       checksumIn = null;

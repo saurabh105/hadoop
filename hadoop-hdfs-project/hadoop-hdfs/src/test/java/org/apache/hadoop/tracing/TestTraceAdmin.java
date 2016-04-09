@@ -44,9 +44,12 @@ public class TestTraceAdmin {
     try {
       ret = trace.run(cmd);
     } finally {
-      System.out.flush();
-      System.setOut(oldStdout);
-      System.setErr(oldStderr);
+      try {
+        System.out.flush();
+      } finally {
+        System.setOut(oldStdout);
+        System.setErr(oldStderr);
+      }
     }
     return "ret:" + ret + ", " + baos.toString();
   }
@@ -59,7 +62,7 @@ public class TestTraceAdmin {
   public void testCreateAndDestroySpanReceiver() throws Exception {
     Configuration conf = new Configuration();
     conf = new Configuration();
-    conf.set(TraceUtils.DEFAULT_HADOOP_PREFIX +
+    conf.set(TraceUtils.DEFAULT_HADOOP_TRACE_PREFIX +
         Tracer.SPAN_RECEIVER_CLASSES_KEY, "");
     MiniDFSCluster cluster =
         new MiniDFSCluster.Builder(conf).numDataNodes(3).build();

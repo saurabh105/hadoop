@@ -22,7 +22,6 @@ import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.StorageType;
-import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSStripedOutputStream;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
@@ -35,6 +34,8 @@ import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureDecoder;
 import org.apache.hadoop.security.token.Token;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -71,6 +72,20 @@ import java.util.concurrent.TimeUnit;
  */
 @InterfaceAudience.Private
 public class StripedBlockUtil {
+
+  public static final Logger LOG = LoggerFactory.getLogger(StripedBlockUtil.class);
+
+  /**
+   * Parses a striped block group into individual blocks.
+   * @param bg The striped block group
+   * @param ecPolicy The erasure coding policy
+   * @return An array of the blocks in the group
+   */
+  public static LocatedBlock[] parseStripedBlockGroup(LocatedStripedBlock bg,
+                                               ErasureCodingPolicy ecPolicy) {
+    return parseStripedBlockGroup(bg, ecPolicy.getCellSize(),
+        ecPolicy.getNumDataUnits(), ecPolicy.getNumParityUnits());
+  }
 
   /**
    * This method parses a striped block group into individual blocks.
@@ -126,6 +141,12 @@ public class StripedBlockUtil {
     return locatedBlock;
   }
 
+  public static ExtendedBlock constructInternalBlock(
+      ExtendedBlock blockGroup, ErasureCodingPolicy ecPolicy,
+      int idxInBlockGroup) {
+    return constructInternalBlock(blockGroup, ecPolicy.getCellSize(),
+        ecPolicy.getNumDataUnits(), idxInBlockGroup);
+  }
   /**
    * This method creates an internal {@link ExtendedBlock} at the given index
    * of a block group.
@@ -139,21 +160,28 @@ public class StripedBlockUtil {
     return block;
   }
 
+  public static long getInternalBlockLength(long dataSize,
+                                            ErasureCodingPolicy ecPolicy,
+                                            int idxInBlockGroup) {
+    return getInternalBlockLength(dataSize, ecPolicy.getCellSize(),
+        ecPolicy.getNumDataUnits(), idxInBlockGroup);
+  }
+
   /**
    * Get the size of an internal block at the given index of a block group
    *
    * @param dataSize Size of the block group only counting data blocks
    * @param cellSize The size of a striping cell
    * @param numDataBlocks The number of data blocks
-   * @param i The logical index in the striped block group
+   * @param idxInBlockGroup The logical index in the striped block group
    * @return The size of the internal block at the specified index
    */
   public static long getInternalBlockLength(long dataSize,
-      int cellSize, int numDataBlocks, int i) {
+      int cellSize, int numDataBlocks, int idxInBlockGroup) {
     Preconditions.checkArgument(dataSize >= 0);
     Preconditions.checkArgument(cellSize > 0);
     Preconditions.checkArgument(numDataBlocks > 0);
-    Preconditions.checkArgument(i >= 0);
+    Preconditions.checkArgument(idxInBlockGroup >= 0);
     // Size of each stripe (only counting data blocks)
     final int stripeSize = cellSize * numDataBlocks;
     // If block group ends at stripe boundary, each internal block has an equal
@@ -165,7 +193,32 @@ public class StripedBlockUtil {
 
     final int numStripes = (int) ((dataSize - 1) / stripeSize + 1);
     return (numStripes - 1L)*cellSize
-        + lastCellSize(lastStripeDataLen, cellSize, numDataBlocks, i);
+        + lastCellSize(lastStripeDataLen, cellSize,
+        numDataBlocks, idxInBlockGroup);
+  }
+
+  /**
+   * Compute the safe length given the internal block lengths.
+   *
+   * @param ecPolicy The EC policy used for the block group
+   * @param blockLens The lengths of internal blocks
+   * @return The safe length
+   */
+  public static long getSafeLength(ErasureCodingPolicy ecPolicy,
+      long[] blockLens) {
+    final int cellSize = ecPolicy.getCellSize();
+    final int dataBlkNum = ecPolicy.getNumDataUnits();
+    Preconditions.checkArgument(blockLens.length >= dataBlkNum);
+    final int stripeSize = dataBlkNum * cellSize;
+    long[] cpy = Arrays.copyOf(blockLens, blockLens.length);
+    Arrays.sort(cpy);
+    // full stripe is a stripe has at least dataBlkNum full cells.
+    // lastFullStripeIdx is the index of the last full stripe.
+    int lastFullStripeIdx =
+        (int) (cpy[cpy.length - dataBlkNum] / cellSize);
+    return lastFullStripeIdx * stripeSize; // return the safeLength
+    // TODO: Include lastFullStripeIdx+1 stripe in safeLength, if there exists
+    // such a stripe (and it must be partial).
   }
 
   private static int lastCellSize(int size, int cellSize, int numDataBlocks,
@@ -221,15 +274,11 @@ public class StripedBlockUtil {
         return new StripingChunkReadResult(StripingChunkReadResult.TIMEOUT);
       }
     } catch (ExecutionException e) {
-      if (DFSClient.LOG.isDebugEnabled()) {
-        DFSClient.LOG.debug("Exception during striped read task", e);
-      }
+      LOG.debug("Exception during striped read task", e);
       return new StripingChunkReadResult(futures.remove(future),
           StripingChunkReadResult.FAILED);
     } catch (CancellationException e) {
-      if (DFSClient.LOG.isDebugEnabled()) {
-        DFSClient.LOG.debug("Exception during striped read task", e);
-      }
+      LOG.debug("Exception during striped read task", e);
       return new StripingChunkReadResult(futures.remove(future),
           StripingChunkReadResult.CANCELLED);
     }

@@ -59,6 +59,7 @@ import org.apache.hadoop.yarn.server.api.protocolrecords.NMContainerStatus;
 import org.apache.hadoop.yarn.server.resourcemanager.TestRMRestart.TestSecurityMockRM;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.MemoryRMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationAttemptStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystemTestUtil;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
@@ -88,7 +89,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.Dom
 import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRenewer;
 import org.apache.hadoop.yarn.util.ControlledClock;
 import org.apache.hadoop.yarn.util.Records;
-import org.apache.hadoop.yarn.util.SystemClock;
 import org.apache.hadoop.yarn.util.resource.DominantResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
@@ -99,22 +99,14 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
 import com.google.common.base.Supplier;
 
-
 @SuppressWarnings({"rawtypes", "unchecked"})
-@RunWith(value = Parameterized.class)
 public class TestWorkPreservingRMRestart extends ParameterizedSchedulerTestBase {
 
   private YarnConfiguration conf;
   MockRM rm1 = null;
   MockRM rm2 = null;
-
-  public TestWorkPreservingRMRestart(SchedulerType type) {
-    super(type);
-  }
 
   @Before
   public void setup() throws UnknownHostException {
@@ -212,11 +204,11 @@ public class TestWorkPreservingRMRestart extends ParameterizedSchedulerTestBase 
     assertTrue(
         "SchedulerNode#toString is not in expected format",
         schedulerNode1
-        .toString().contains(schedulerNode1.getAvailableResource().toString()));
+        .toString().contains(schedulerNode1.getUnallocatedResource().toString()));
     assertTrue(
         "SchedulerNode#toString is not in expected format",
         schedulerNode1
-        .toString().contains(schedulerNode1.getUsedResource().toString()));
+        .toString().contains(schedulerNode1.getAllocatedResource().toString()));
 
     // ********* check scheduler node state.*******
     // 2 running containers.
@@ -233,8 +225,8 @@ public class TestWorkPreservingRMRestart extends ParameterizedSchedulerTestBase 
     assertEquals(2, schedulerNode1.getNumContainers());
 
     assertEquals(Resources.subtract(nmResource, usedResources),
-      schedulerNode1.getAvailableResource());
-    assertEquals(usedResources, schedulerNode1.getUsedResource());
+      schedulerNode1.getUnallocatedResource());
+    assertEquals(usedResources, schedulerNode1.getAllocatedResource());
     Resource availableResources = Resources.subtract(nmResource, usedResources);
 
     // ***** check queue state based on the underlying scheduler ********
@@ -378,8 +370,8 @@ public class TestWorkPreservingRMRestart extends ParameterizedSchedulerTestBase 
     assertEquals(2, schedulerNode1.getNumContainers());
 
     assertEquals(Resources.subtract(nmResource, usedResources),
-        schedulerNode1.getAvailableResource());
-    assertEquals(usedResources, schedulerNode1.getUsedResource());
+        schedulerNode1.getUnallocatedResource());
+    assertEquals(usedResources, schedulerNode1.getAllocatedResource());
     Resource availableResources = Resources.subtract(nmResource, usedResources);
 
     // 6. Verify the scheduler state like attempt info.
@@ -1162,7 +1154,7 @@ public class TestWorkPreservingRMRestart extends ParameterizedSchedulerTestBase 
     rm2.start();
     nm1.setResourceTrackerService(rm2.getResourceTrackerService());
     nm1.registerNode();
-    ControlledClock clock = new ControlledClock(new SystemClock());
+    ControlledClock clock = new ControlledClock();
     long startTime = System.currentTimeMillis();
     ((RMContextImpl)rm2.getRMContext()).setSystemClock(clock);
     am1.setAMRMProtocol(rm2.getApplicationMasterService(), rm2.getRMContext());
@@ -1367,4 +1359,44 @@ public class TestWorkPreservingRMRestart extends ParameterizedSchedulerTestBase 
     assertEquals(1,loadedAttempt1.getJustFinishedContainers().size());
   }
 
+  // Test that if application state was saved, but attempt state was not saved.
+  // RM should start correctly.
+  @Test (timeout = 20000)
+  public void testAppStateSavedButAttemptStateNotSaved() throws Exception {
+    MemoryRMStateStore memStore = new MemoryRMStateStore() {
+      @Override public synchronized void updateApplicationAttemptStateInternal(
+          ApplicationAttemptId appAttemptId,
+          ApplicationAttemptStateData attemptState) {
+        // do nothing;
+        // simulate the failure that attempt final state is not saved.
+      }
+    };
+    memStore.init(conf);
+    rm1 = new MockRM(conf, memStore);
+    rm1.start();
+
+    MockNM nm1 = new MockNM("127.0.0.1:1234", 15120, rm1.getResourceTrackerService());
+    nm1.registerNode();
+
+    RMApp app1 = rm1.submitApp(200);
+    MockAM am1 = MockRM.launchAndRegisterAM(app1, rm1, nm1);
+    MockRM.finishAMAndVerifyAppState(app1, rm1, nm1, am1);
+
+    ApplicationStateData appSavedState =
+        memStore.getState().getApplicationState().get(app1.getApplicationId());
+
+    // check that app state is  saved.
+    assertEquals(RMAppState.FINISHED, appSavedState.getState());
+    // check that attempt state is not saved.
+    assertNull(appSavedState.getAttempt(am1.getApplicationAttemptId()).getState());
+
+    rm2 = new MockRM(conf, memStore);
+    rm2.start();
+    RMApp recoveredApp1 =
+        rm2.getRMContext().getRMApps().get(app1.getApplicationId());
+
+    assertEquals(RMAppState.FINISHED, recoveredApp1.getState());
+    // check that attempt state is recovered correctly.
+    assertEquals(RMAppAttemptState.FINISHED, recoveredApp1.getCurrentAppAttempt().getState());
+  }
 }

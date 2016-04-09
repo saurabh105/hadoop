@@ -70,6 +70,7 @@ public class TestComputeInvalidateWork {
   public void teardown() throws Exception {
     if (cluster != null) {
       cluster.shutdown();
+      cluster = null;
     }
   }
 
@@ -80,7 +81,7 @@ public class TestComputeInvalidateWork {
   @Test(timeout=120000)
   public void testCompInvalidate() throws Exception {
     final int blockInvalidateLimit = bm.getDatanodeManager()
-        .blockInvalidateLimit;
+        .getBlockInvalidateLimit();
     namesystem.writeLock();
     try {
       for (int i=0; i<nodes.length; i++) {
@@ -145,6 +146,7 @@ public class TestComputeInvalidateWork {
     // Create a file and shutdown the DNs, which populates InvalidateBlocks
     DFSTestUtil.createFile(dfs, path, dfs.getDefaultBlockSize(),
         (short) NUM_OF_DATANODES, 0xED0ED0);
+    DFSTestUtil.waitForReplication(dfs, path, (short) NUM_OF_DATANODES, 12000);
     for (DataNode dn : cluster.getDataNodes()) {
       dn.shutdown();
     }
